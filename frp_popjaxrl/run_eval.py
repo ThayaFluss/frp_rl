@@ -15,21 +15,21 @@ Outputs:
     - CSV: Trial-wise return data
 """
 
+import argparse
+import pickle
+
 import jax
 import jax.numpy as jnp
-import pickle
-from flax.core import freeze
-import argparse
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+from flax.core import freeze
+from gymnax.environments import spaces
 
-from envs.meta_environment import create_meta_environment
-from envs.wrappers import AliasPrevActionV2, LogWrapper
 from algorithms.ppo_gru_in_context import ActorCriticRNN, ScannedRNN
 from algorithms.ppo_s5_in_context import ActorCriticS5
 from algorithms.ppo_s5_in_context import init_S5SSM, make_DPLR_HiPPO, StackedEncoderModel
-from gymnax.environments import spaces
-import optax
+from envs.meta_environment import create_meta_environment
+from envs.wrappers import AliasPrevActionV2, LogWrapper
 
 
 class Transition:
@@ -71,9 +71,7 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
             num_episodes=10
         )
     """
-    # ============================================================================
-    # Load checkpoint and setup environment
-    # ============================================================================
+    # --- Load checkpoint and setup environment ---
     print(f"Loading checkpoint from {checkpoint_path}")
     with open(checkpoint_path, "rb") as f:
         checkpoint = pickle.load(f)
@@ -112,11 +110,9 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
     # Update config with environment
     config["ENV"] = env
     config["ENV_PARAMS"] = env_params
-    config["CONTINUOUS"] = type(env.action_space(env_params)) == spaces.Box
+    config["CONTINUOUS"] = isinstance(env.action_space(env_params), spaces.Box)
 
-    # ============================================================================
-    # Initialize network (GRU or S5)
-    # ============================================================================
+    # --- Initialize network (GRU or S5) ---
     print(f"Initializing {arch} network")
     if arch == "gru":
         if config["CONTINUOUS"]:
@@ -173,16 +169,12 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
     else:
         raise ValueError(f"Unknown architecture: {arch}")
 
-    # ============================================================================
-    # Load saved model parameters
-    # ============================================================================
+    # --- Load saved model parameters ---
     print("Loading saved parameters")
     # params_dict has structure {'params': {...}}, so we need to use it directly
     network_params = freeze(params_dict)
 
-    # ============================================================================
-    # Run evaluation episodes
-    # ============================================================================
+    # --- Run evaluation episodes ---
     print(f"\nRunning {num_episodes} evaluation episodes...")
     episode_returns = []
     episode_lengths = []
@@ -197,7 +189,10 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
         # Reset environment (with batch size 1)
         rng, reset_rng = jax.random.split(rng)
         reset_rngs = jax.random.split(reset_rng, 1)
-        partial_reset = lambda x: env.reset(x, env_params)
+
+        def partial_reset(x):
+            return env.reset(x, env_params)
+
         obs, env_state = jax.vmap(partial_reset)(reset_rngs)
 
         if arch == "gru":
@@ -228,7 +223,7 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
             # Step environment (only if not already done)
             rng, step_rng = jax.random.split(rng)
             step_rngs = jax.random.split(step_rng, 1)
-            obs_new, env_state_new, reward, done_new, _ = jax.vmap(env.step, in_axes=(0,0,0,None))(
+            obs_new, env_state_new, reward, done_new, _ = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
                 step_rngs, env_state, action, env_params
             )
 
@@ -253,9 +248,7 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
             step_fn, carry, None, max_steps
         )
 
-        # ========================================================================
-        # Post-process: Calculate per-trial returns from step data
-        # ========================================================================
+        # --- Calculate per-trial returns from step data ---
         rewards, trial_nums, dones = step_data
 
         # Compute trial returns using vectorized operations
@@ -282,9 +275,7 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
 
         print(f"Episode {episode+1}: Return = {episode_return:.2f}, Length = {episode_length}")
 
-    # ============================================================================
-    # Compute statistics across episodes
-    # ============================================================================
+    # --- Compute statistics across episodes ---
     all_trial_returns = np.array(all_trial_returns)  # Shape: (num_episodes, num_trials)
     num_trials = all_trial_returns.shape[1]
 
@@ -306,9 +297,7 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
     for trial_idx in range(num_trials):
         print(f"{trial_idx:5d} | {trial_means[trial_idx]:11.2f} | {trial_stds[trial_idx]:10.2f}")
 
-    # ============================================================================
-    # Generate and save visualization
-    # ============================================================================
+    # --- Generate and save visualization ---
     # Plot: Trial number (x-axis) vs Return (y-axis) with mean ± std
     plt.figure(figsize=(10, 6))
     trial_numbers = np.arange(num_trials)
@@ -333,11 +322,9 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
     print(f"\nPlot saved to: {plot_filename}")
     plt.close()
 
-    # ============================================================================
-    # Save data to CSV
-    # ============================================================================
+    # --- Save data to CSV ---
     csv_filename = checkpoint_path.replace('.pkl', f'_trial_returns_n{num_trials}.csv')
-    with open(csv_filename, 'w') as f:
+    with open(csv_filename, 'w', encoding='utf-8') as f:
         f.write("Trial,Mean_Return,Std_Return\n")
         for trial_idx in range(num_trials):
             f.write(f"{trial_idx},{trial_means[trial_idx]:.6f},{trial_stds[trial_idx]:.6f}\n")
@@ -357,18 +344,16 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
 
 
 if __name__ == "__main__":
-    # ============================================================================
-    # Command-line interface
-    # ============================================================================
+    # --- Command-line interface ---
     parser = argparse.ArgumentParser(description="Evaluate a saved model checkpoint")
     parser.add_argument("--checkpoint", type=str, required=True,
-                       help="Path to checkpoint file (e.g., checkpoints/cartpole_gru_seed42.pkl)")
+                        help="Path to checkpoint file (e.g., checkpoints/cartpole_gru_seed42.pkl)")
     parser.add_argument("--num_trials_eval", type=int, default=None,
-                       help="Number of trials per episode for evaluation (default: use checkpoint value)")
+                        help="Number of trials per episode for evaluation (default: use checkpoint value)")
     parser.add_argument("--num_episodes", type=int, default=10,
-                       help="Number of episodes to evaluate (default: 10)")
+                        help="Number of episodes to evaluate (default: 10)")
     parser.add_argument("--seed", type=int, default=0,
-                       help="Random seed for evaluation (default: 0)")
+                        help="Random seed for evaluation (default: 0)")
 
     args = parser.parse_args()
 

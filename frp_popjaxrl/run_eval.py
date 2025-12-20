@@ -206,7 +206,7 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
 
         # Track rewards and trial numbers for each step
         num_trials = meta_kwargs.get('num_trials_per_episode', 16)
-        max_steps = num_trials * 500  # Assume max 500 steps per trial
+        max_steps = num_trials * 200  # Assume max 200 steps per trial
 
         def step_fn(carry, _):
             """Single environment step with trial tracking."""

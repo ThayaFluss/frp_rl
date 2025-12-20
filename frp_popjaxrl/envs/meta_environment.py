@@ -270,11 +270,14 @@ def create_gymnax_environment(env_name: str, env_kwargs: Dict[str, Any], meta_kw
     except Exception as e:
         raise ValueError(f"Error creating gymnax environment {env_name}: {e}")
 
-def create_meta_environment(env_name: str, env_kwargs: Dict[str, Any], meta_kwargs: Dict[str, Any], norm_kwargs: Dict[str, Any] = None):    
+def create_meta_environment(env_name: str, env_kwargs: Dict[str, Any], meta_kwargs: Dict[str, Any], norm_kwargs: Dict[str, Any] = None):
     # Handle popgym environments
     if env_name == "cartpole":
         from .environments.popgym_cartpole import NoisyStatelessCartPole
         return MetaEnvironment(NoisyStatelessCartPole, env_kwargs, meta_kwargs)
+    if env_name == "cartpole_origin":
+        from .environments.meta_cartpole_origin import NoisyStatelessMetaCartPole
+        return NoisyStatelessMetaCartPole(**meta_kwargs)
     if env_name == "s_cartpole_hard":
         from .environments.popgym_cartpole import StatelessCartPoleHard
         return MetaEnvironment(StatelessCartPoleHard, env_kwargs, meta_kwargs)

@@ -37,7 +37,7 @@ class MetaEnvParams:
 
 class NoisyStatelessMetaCartPole(environment.Environment):
 
-    def __init__(self):
+    def __init__(self, **meta_kwargs):
         super().__init__()
         self.env = NoisyStatelessCartPole(max_steps_in_episode=200, noise_sigma=0.0)
         self.obs_shape = (7,)
@@ -92,7 +92,7 @@ class NoisyStatelessMetaCartPole(environment.Environment):
         """Performs resetting of environment."""
         env_key, obs_key = jax.random.split(key)
         env_obs, env_state = self.env.reset_env(env_key, params.env_params)
-        
+
         # Initialize MetaAugNetwork with the provided parameters
         self.obs_aug = MetaAugNetwork()
         #self.obs_aug = create_meta_aug_network(**params.aug_network_params)

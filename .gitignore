@@ -5,6 +5,8 @@ wandb/*
 *.pdf
 */wandb/*
 *.npy
+checkpoints/
+*.pkl
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

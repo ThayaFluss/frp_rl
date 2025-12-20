@@ -5,6 +5,9 @@ from envs.meta_environment import create_meta_environment
 from envs.wrappers import AliasPrevActionV2
 from algorithms.ppo_gru_in_context import make_train as make_train_gru
 from algorithms.ppo_s5_in_context import make_train as make_train_s5
+import pickle
+import os
+from flax.core import unfreeze
 
 import argparse
 
@@ -157,32 +160,93 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
     if args.save_results == 1:
         jnp.save(f"results/{num_runs}_{env_name}_{arch}_{file_tag}.npy", info_dict)
 
+    # Save model checkpoint if requested
+    if args.save_model == 1:
+        os.makedirs("checkpoints", exist_ok=True)
+        checkpoint_name = f"checkpoints/{env_name}_{arch}_{file_tag}_seed{args.seed}.pkl"
+
+        # Extract params from the output
+        if arch == "s5":
+            runner_state = out_s5[0]
+        elif arch == "gru":
+            runner_state = out_rnn[0]
+
+        # Get the first run's state (in case of multiple runs)
+        train_state = jax.tree_util.tree_map(lambda x: x[0] if len(x.shape) > 0 else x, runner_state[0])
+
+        # Convert params to a serializable format
+        params_dict = unfreeze(train_state.params)
+
+        # Create a copy of config without environment objects (which can't be pickled)
+        config_to_save = {k: v for k, v in config.items() if k not in ["ENV", "ENV_PARAMS", "EVAL_ENV", "EVAL_ENV_PARAMS"]}
+
+        # Save checkpoint with all necessary information
+        checkpoint = {
+            "params": params_dict,
+            "config": config_to_save,
+            "arch": arch,
+            "env_name": env_name,
+            "env_kwargs": env_kwargs,
+            "meta_kwargs": meta_kwargs,
+            "norm_kwargs": norm_kwargs,
+            "seed": args.seed,
+        }
+
+        with open(checkpoint_name, "wb") as f:
+            pickle.dump(checkpoint, f)
+
+        print(f"Model saved to {checkpoint_name}")
+
+
 if __name__ == "__main__":
     import wandb
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--num_runs", type=int, default=1)
-    parser.add_argument("--env", type=str, default="cartpole", help="Base env XXX of MetaXXX.")
-    parser.add_argument("--arch", type=str, default="s5")
-    parser.add_argument("--log_wandb", type=str, default="popgym")
-    parser.add_argument("--debug", type=int, default=0, help="debug")
-    parser.add_argument("--seed", type=int, default=42,  help="Random seed")
+    parser.add_argument("--num_runs", type=int, default=1,
+                        help="Number of training runs (default: %(default)s)")
+    parser.add_argument("--env", type=str, default="cartpole",
+                        help="Base env XXX of MetaXXX (default: %(default)s)")
+    parser.add_argument("--arch", type=str, default="s5",
+                        help="Architecture: gru or s5 (default: %(default)s)")
+    parser.add_argument("--log_wandb", type=str, default="popgym",
+                        help="Wandb project name (default: %(default)s)")
+    parser.add_argument("--debug", type=int, default=0,
+                        help="Debug mode: 0 or 1 (default: %(default)s)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed (default: %(default)s)")
 
     ### For meta envs
-    parser.add_argument("--dim", type=int, default=64, help="output dim of metaaugnetwork")
-    parser.add_argument("--depth", type=int, default=2, help="depth of MetaAugNetwork")
-    parser.add_argument("--max_depth", type=int, default=8, help="max depth metaaugnetwork (num paralell is 2**max_depth)")
-    parser.add_argument("--beta", type=float, default=1, help="beta for nelf")    
-    parser.add_argument("--with_adjoint", type=int, default=0, help="use adjoint of orthogonal matrix in branch")
-    parser.add_argument("--reset_words", type=int, default=1, help="reset words per epoch")
+    parser.add_argument("--dim", type=int, default=64,
+                        help="Output dim of metaaugnetwork (default: %(default)s)")
+    parser.add_argument("--depth", type=int, default=2,
+                        help="Depth of MetaAugNetwork (default: %(default)s)")
+    parser.add_argument("--max_depth", type=int, default=8,
+                        help="Max depth metaaugnetwork, num parallel is 2**max_depth (default: %(default)s)")
+    parser.add_argument("--beta", type=float, default=1,
+                        help="Beta for nelf (default: %(default)s)")
+    parser.add_argument("--with_adjoint", type=int, default=0,
+                        help="Use adjoint of orthogonal matrix in branch (default: %(default)s)")
+    parser.add_argument("--reset_words", type=int, default=1,
+                        help="Reset words per epoch (default: %(default)s)")
 
     ### For evaluation
-    parser.add_argument("--eval_method", type=str, default="tiling", help="tiling / padding / identity")
-    parser.add_argument("--use_few_shot", type=int, default=0, help="use few-shot learning (1) or in-context only (0)")
+    parser.add_argument("--eval_method", type=str, default="tiling",
+                        help="Evaluation method: tiling / padding / identity (default: %(default)s)")
+    parser.add_argument("--use_few_shot", type=int, default=0,
+                        help="Use few-shot learning: 1 or in-context only: 0 (default: %(default)s)")
+    parser.add_argument("--num_trials", type=int, default=16,
+                        help="Number of trials per episode (default: %(default)s)")
 
     ### For gymnax enviroments. Unnecessary  for popgym.
-    parser.add_argument("--norm_strategy", type=str, default="fixed", help="reward normalization strategy: 'dynamic', 'fixed', 'minmax', or 'custom'")
-    parser.add_argument("--norm_max_steps", type=int, default=200, help="maximum steps for reward normalization scaling")
-    parser.add_argument("--save_results", type=int, default=0, help="save results npy (default:%(default)s)")
+    parser.add_argument("--norm_strategy", type=str, default="fixed",
+                        help="Reward normalization strategy: dynamic/fixed/minmax/custom (default: %(default)s)")
+    parser.add_argument("--norm_max_steps", type=int, default=200,
+                        help="Maximum steps for reward normalization scaling (default: %(default)s)")
+    
+    ### For saving results and models
+    parser.add_argument("--save_results", type=int, default=0,
+                        help="Save results npy (default: %(default)s)")
+    parser.add_argument("--save_model", type=int, default=0,
+                        help="Save model checkpoint (default: %(default)s)")
 
     args = parser.parse_args()
     
@@ -192,6 +256,7 @@ if __name__ == "__main__":
         "meta_max_depth": args.max_depth,
         "meta_dim": args.dim,
         "meta_with_adjoint": (args.with_adjoint==1),
+        "num_trials_per_episode": args.num_trials,
     }
 
     # Environment specific kwargs

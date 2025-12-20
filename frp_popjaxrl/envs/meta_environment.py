@@ -275,9 +275,21 @@ def create_meta_environment(env_name: str, env_kwargs: Dict[str, Any], meta_kwar
     if env_name == "cartpole":
         from .environments.popgym_cartpole import NoisyStatelessCartPole
         return MetaEnvironment(NoisyStatelessCartPole, env_kwargs, meta_kwargs)
+    if env_name == "s_cartpole_hard":
+        from .environments.popgym_cartpole import StatelessCartPoleHard
+        return MetaEnvironment(StatelessCartPoleHard, env_kwargs, meta_kwargs)
+    if env_name == "ns_cartpole_hard":
+        from .environments.popgym_cartpole import NoisyStatelessCartPoleHard
+        return MetaEnvironment(NoisyStatelessCartPoleHard, env_kwargs, meta_kwargs)
+
+
     elif env_name == "minesweeper":
         from .environments.popgym_minesweeper import MineSweeper
         return MetaEnvironment(MineSweeper, env_kwargs, meta_kwargs)
+    elif env_name == "minesweeper_hard":
+        from .environments.popgym_minesweeper import MineSweeperHard
+        return MetaEnvironment(MineSweeperHard, env_kwargs, meta_kwargs)
+
     elif env_name == "multiarmedbandit":
         from .environments.popgym_multiarmedbandit import MultiarmedBandit
         return MetaEnvironment(MultiarmedBandit, env_kwargs, meta_kwargs)
@@ -320,9 +332,13 @@ def create_meta_environment(env_name: str, env_kwargs: Dict[str, Any], meta_kwar
     elif env_name == "repeat_first":
         from .environments.popgym_repeat_first import RepeatFirst
         return MetaEnvironment(RepeatFirst, env_kwargs, meta_kwargs)
-    elif env_name == "repeat_previous":
-        from .environments.popgym_repeat_previous import RepeatPrevious
-        return MetaEnvironment(RepeatPrevious, env_kwargs, meta_kwargs)
+    elif env_name == "repeat_first_hard":
+        from .environments.popgym_repeat_first import RepeatFirstHard
+        return MetaEnvironment(RepeatFirstHard, env_kwargs, meta_kwargs)
+    elif env_name == "repeat_previous_hard":
+        from .environments.popgym_repeat_previous import RepeatPreviousHard
+        return MetaEnvironment(RepeatPreviousHard, env_kwargs, meta_kwargs)
+
 
     # Check if it's a gymnax environment
     elif env_name.startswith("gymnax_"):

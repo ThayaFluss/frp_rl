@@ -72,32 +72,32 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         }
     else:
         config = {
-        "LR": 5e-5,
-        "NUM_ENVS": 64,
-        "NUM_STEPS": 1024,
-        "TOTAL_TIMESTEPS": 15e6, 
-        "UPDATE_EPOCHS": 30,
-        "NUM_MINIBATCHES": 8,
+        "LR": args.lr,
+        "NUM_ENVS": args.num_envs,
+        "NUM_STEPS": args.num_steps,
+        "TOTAL_TIMESTEPS": args.total_timesteps,
+        "UPDATE_EPOCHS": args.update_epochs,
+        "NUM_MINIBATCHES": args.num_minibatches,
         "GAMMA": 0.99,
-        "GAE_LAMBDA": 1.0,
+        "GAE_LAMBDA": args.gae_lambda,
         "CLIP_EPS": 0.2,
-        "ENT_COEF": 0.0,
+        "ENT_COEF": args.ent_coef,
         "VF_COEF": 1.0,
         "MAX_GRAD_NORM": 0.5,
         "ENV": AliasPrevActionV2(env),
         "ENV_PARAMS": env_params,
         "EVAL_ENV": AliasPrevActionV2(eval_env),
         "EVAL_ENV_PARAMS": eval_env_params,
-        "ANNEAL_LR": False,
+        "ANNEAL_LR": (args.anneal_lr==1),
         "DEBUG": True,
         "S5_D_MODEL": 256,
         "S5_SSM_SIZE": 256,
-        "S5_N_LAYERS": 4,
+        "S5_N_LAYERS": args.s5_n_layers,
         "S5_BLOCKS": 1,
         "S5_ACTIVATION": "full_glu",
-        "S5_DO_NORM": False,
-        "S5_PRENORM": False,
-        "S5_DO_GTRXL_NORM": False,
+        "S5_DO_NORM": (args.s5_do_norm==1),
+        "S5_PRENORM": (args.s5_prenorm==1),
+        "S5_DO_GTRXL_NORM": (args.s5_do_gtrxl_norm==1),
         "RESET_WORDS": (args.reset_words==1)
         }
 
@@ -221,8 +221,6 @@ if __name__ == "__main__":
                         help="Depth of MetaAugNetwork (default: %(default)s)")
     parser.add_argument("--max_depth", type=int, default=8,
                         help="Max depth metaaugnetwork, num parallel is 2**max_depth (default: %(default)s)")
-    parser.add_argument("--beta", type=float, default=1,
-                        help="Beta for nelf (default: %(default)s)")
     parser.add_argument("--with_adjoint", type=int, default=0,
                         help="Use adjoint of orthogonal matrix in branch (default: %(default)s)")
     parser.add_argument("--reset_words", type=int, default=1,
@@ -247,6 +245,36 @@ if __name__ == "__main__":
                         help="Save results npy (default: %(default)s)")
     parser.add_argument("--save_model", type=int, default=0,
                         help="Save model checkpoint (default: %(default)s)")
+
+    ### For PPO hyperparameters (only used when debug=0)
+    parser.add_argument("--lr", type=float, default=5e-5,
+                        help="Learning rate (default: %(default)s)")
+    parser.add_argument("--ent_coef", type=float, default=0.0,
+                        help="Entropy coefficient (default: %(default)s)")
+    parser.add_argument("--gae_lambda", type=float, default=1.0,
+                        help="GAE lambda (default: %(default)s)")
+    parser.add_argument("--update_epochs", type=int, default=30,
+                        help="Number of update epochs (default: %(default)s)")
+    parser.add_argument("--num_envs", type=int, default=64,
+                        help="Number of parallel environments (default: %(default)s)")
+    parser.add_argument("--num_steps", type=int, default=1024,
+                        help="Number of steps per update (default: %(default)s)")
+    parser.add_argument("--total_timesteps", type=float, default=15e6,
+                        help="Total timesteps (default: %(default)s)")
+    parser.add_argument("--num_minibatches", type=int, default=8,
+                        help="Number of minibatches (default: %(default)s)")
+    parser.add_argument("--anneal_lr", type=int, default=0,
+                        help="Anneal learning rate: 0 or 1 (default: %(default)s)")
+
+    ### For S5 architecture hyperparameters (only used when debug=0)
+    parser.add_argument("--s5_n_layers", type=int, default=4,
+                        help="Number of S5 layers (default: %(default)s)")
+    parser.add_argument("--s5_do_norm", type=int, default=0,
+                        help="S5 do normalization: 0 or 1 (default: %(default)s)")
+    parser.add_argument("--s5_prenorm", type=int, default=0,
+                        help="S5 prenormalization: 0 or 1 (default: %(default)s)")
+    parser.add_argument("--s5_do_gtrxl_norm", type=int, default=0,
+                        help="S5 GTrXL normalization: 0 or 1 (default: %(default)s)")
 
     args = parser.parse_args()
     

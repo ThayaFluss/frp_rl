@@ -1,0 +1,51 @@
+program: run_meta_popgym.py
+method: bayes
+metric:
+  name: metric
+  goal: maximize
+parameters:
+  # Fixed parameters
+  env:
+    value: cartpole
+  arch:
+    value: s5
+  seed:
+    value: 42
+
+  # High priority: Meta-learning parameters
+  dim:
+    values: [64, 128, 256]
+  depth:
+    values: [2, 4, 6]
+
+  # High priority: Exploration
+  ent_coef:
+    distribution: uniform
+    min: 0.0
+    max: 0.05
+
+  # High priority: Learning rate
+  lr:
+    distribution: log_uniform_values
+    min: 5e-5
+    max: 2.5e-4
+
+  # Medium priority: In-context learning
+  num_trials:
+    values: [16, 32]
+
+  # Medium priority: Network depth
+  s5_n_layers:
+    values: [4, 6, 8]
+
+  # Medium priority: Normalization
+  s5_do_norm:
+    values: [0, 1]
+  s5_prenorm:
+    values: [0, 1]
+
+  # Lower priority: GAE
+  gae_lambda:
+    distribution: uniform
+    min: 0.95
+    max: 1.0

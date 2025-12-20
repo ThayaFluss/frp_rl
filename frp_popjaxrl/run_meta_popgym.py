@@ -197,36 +197,56 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
 
         print(f"Model saved to {checkpoint_name}")
 
+
 if __name__ == "__main__":
     import wandb
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--num_runs", type=int, default=1)
-    parser.add_argument("--env", type=str, default="cartpole", help="Base env XXX of MetaXXX.")
-    parser.add_argument("--arch", type=str, default="s5")
-    parser.add_argument("--log_wandb", type=str, default="popgym")
-    parser.add_argument("--debug", type=int, default=0, help="debug")
-    parser.add_argument("--seed", type=int, default=42,  help="Random seed")
+    parser.add_argument("--num_runs", type=int, default=1,
+                        help="Number of training runs (default: %(default)s)")
+    parser.add_argument("--env", type=str, default="cartpole",
+                        help="Base env XXX of MetaXXX (default: %(default)s)")
+    parser.add_argument("--arch", type=str, default="s5",
+                        help="Architecture: gru or s5 (default: %(default)s)")
+    parser.add_argument("--log_wandb", type=str, default="popgym",
+                        help="Wandb project name (default: %(default)s)")
+    parser.add_argument("--debug", type=int, default=0,
+                        help="Debug mode: 0 or 1 (default: %(default)s)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed (default: %(default)s)")
 
     ### For meta envs
-    parser.add_argument("--dim", type=int, default=64, help="output dim of metaaugnetwork")
-    parser.add_argument("--depth", type=int, default=2, help="depth of MetaAugNetwork")
-    parser.add_argument("--max_depth", type=int, default=8, help="max depth metaaugnetwork (num paralell is 2**max_depth)")
-    parser.add_argument("--beta", type=float, default=1, help="beta for nelf")    
-    parser.add_argument("--with_adjoint", type=int, default=0, help="use adjoint of orthogonal matrix in branch")
-    parser.add_argument("--reset_words", type=int, default=1, help="reset words per epoch")
+    parser.add_argument("--dim", type=int, default=64,
+                        help="Output dim of metaaugnetwork (default: %(default)s)")
+    parser.add_argument("--depth", type=int, default=2,
+                        help="Depth of MetaAugNetwork (default: %(default)s)")
+    parser.add_argument("--max_depth", type=int, default=8,
+                        help="Max depth metaaugnetwork, num parallel is 2**max_depth (default: %(default)s)")
+    parser.add_argument("--beta", type=float, default=1,
+                        help="Beta for nelf (default: %(default)s)")
+    parser.add_argument("--with_adjoint", type=int, default=0,
+                        help="Use adjoint of orthogonal matrix in branch (default: %(default)s)")
+    parser.add_argument("--reset_words", type=int, default=1,
+                        help="Reset words per epoch (default: %(default)s)")
 
     ### For evaluation
-    parser.add_argument("--eval_method", type=str, default="tiling", help="tiling / padding / identity")
-    parser.add_argument("--use_few_shot", type=int, default=0, help="use few-shot learning (1) or in-context only (0)")
-    parser.add_argument("--num_trials", type=int, default=16, help="number of trials per episode")
+    parser.add_argument("--eval_method", type=str, default="tiling",
+                        help="Evaluation method: tiling / padding / identity (default: %(default)s)")
+    parser.add_argument("--use_few_shot", type=int, default=0,
+                        help="Use few-shot learning: 1 or in-context only: 0 (default: %(default)s)")
+    parser.add_argument("--num_trials", type=int, default=16,
+                        help="Number of trials per episode (default: %(default)s)")
 
     ### For gymnax enviroments. Unnecessary  for popgym.
-    parser.add_argument("--norm_strategy", type=str, default="fixed", help="reward normalization strategy: 'dynamic', 'fixed', 'minmax', or 'custom'")
-    parser.add_argument("--norm_max_steps", type=int, default=200, help="maximum steps for reward normalization scaling")
+    parser.add_argument("--norm_strategy", type=str, default="fixed",
+                        help="Reward normalization strategy: dynamic/fixed/minmax/custom (default: %(default)s)")
+    parser.add_argument("--norm_max_steps", type=int, default=200,
+                        help="Maximum steps for reward normalization scaling (default: %(default)s)")
     
     ### For saving results and models
-    parser.add_argument("--save_results", type=int, default=0, help="save results npy (default:%(default)s)")
-    parser.add_argument("--save_model", type=int, default=0, help="save model checkpoint (default:%(default)s)")
+    parser.add_argument("--save_results", type=int, default=0,
+                        help="Save results npy (default: %(default)s)")
+    parser.add_argument("--save_model", type=int, default=0,
+                        help="Save model checkpoint (default: %(default)s)")
 
     args = parser.parse_args()
     

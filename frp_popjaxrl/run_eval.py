@@ -351,9 +351,9 @@ if __name__ == "__main__":
     parser.add_argument("--num_trials_eval", type=int, default=None,
                         help="Number of trials per episode for evaluation (default: use checkpoint value)")
     parser.add_argument("--num_episodes", type=int, default=10,
-                        help="Number of episodes to evaluate (default: 10)")
+                        help="Number of episodes to evaluate (default: %(default)s)")
     parser.add_argument("--seed", type=int, default=0,
-                        help="Random seed for evaluation (default: 0)")
+                        help="Random seed for evaluation (default: %(default)s)")
 
     args = parser.parse_args()
 

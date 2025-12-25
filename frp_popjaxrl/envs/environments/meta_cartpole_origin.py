@@ -36,7 +36,6 @@ class MetaEnvParams:
     #aug_network_params: Dict[str, Any] = struct.field(default_factory=dict)
 
 class NoisyStatelessMetaCartPole(environment.Environment):
-
     def __init__(self, **meta_kwargs):
         super().__init__()
         self.env = NoisyStatelessCartPole(max_steps_in_episode=200, noise_sigma=0.0)

@@ -215,9 +215,9 @@ if __name__ == "__main__":
                         help="Random seed (default: %(default)s)")
 
     ### For meta envs
-    parser.add_argument("--dim", type=int, default=64,
+    parser.add_argument("--dim", type=int, default=128,
                         help="Output dim of metaaugnetwork (default: %(default)s)")
-    parser.add_argument("--depth", type=int, default=2,
+    parser.add_argument("--depth", type=int, default=4,
                         help="Depth of MetaAugNetwork (default: %(default)s)")
     parser.add_argument("--max_depth", type=int, default=8,
                         help="Max depth metaaugnetwork, num parallel is 2**max_depth (default: %(default)s)")

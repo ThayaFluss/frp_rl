@@ -104,6 +104,9 @@ def make_train(config):
         return config["LR"] * frac
 
     def train(rng):
+        # Initialize max metric tracking
+        max_train_metric = float('-inf')
+        max_eval_metric = float('-inf')
 
         # INIT NETWORK
         if config["CONTINUOUS"]:
@@ -334,19 +337,36 @@ def make_train(config):
 
             train_metric = safe_mean(traj_batch.info)
             in_context_metric = safe_mean(eval_traj_batch.info)
-            
-            def callback(train_metric, in_context_metric):
+
+            # Count episode done events (episode end = reset_env will be used next step)
+            train_episode_done_count = traj_batch.done.sum()
+            eval_episode_done_count = eval_traj_batch.done.sum()
+
+            def callback(train_metric, in_context_metric, train_done, eval_done):
+                nonlocal max_train_metric, max_eval_metric
+
+                # Update max values
+                max_train_metric = max(max_train_metric, float(train_metric))
+                max_eval_metric = max(max_eval_metric, float(in_context_metric))
+
                 print(f"Train metric: {train_metric}, In-context: {in_context_metric}")
+                print(f"Train episode done: {train_done}, Eval episode done: {eval_done}")
                 wandb.log({
                         "metric": train_metric,
                         "eval_metric": in_context_metric,
+                        "max_metric": max_train_metric,
+                        "max_eval_metric": max_eval_metric,
+                        "train_episode_done_count": train_done,
+                        "eval_episode_done_count": eval_done,
                 })
-            jax.debug.callback(callback, train_metric, in_context_metric)
+            jax.debug.callback(callback, train_metric, in_context_metric, train_episode_done_count, eval_episode_done_count)
 
             # Create metrics dictionary
             metrics_dict = {
                 "train_metric": train_metric,
                 "in_context_metric": safe_mean(eval_traj_batch.info),
+                "train_episode_done_count": train_episode_done_count,
+                "eval_episode_done_count": eval_episode_done_count,
             }
 
             return (train_state, env_state, last_obs, last_done, hstate, rng, words), metrics_dict

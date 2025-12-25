@@ -276,7 +276,7 @@ def create_meta_environment(env_name: str, env_kwargs: Dict[str, Any], meta_kwar
         from .environments.popgym_cartpole import NoisyStatelessCartPole
         return MetaEnvironment(NoisyStatelessCartPole, env_kwargs, meta_kwargs)
     if env_name == "cartpole_origin":
-        from .environments.meta_cartpole_origin import NoisyStatelessMetaCartPole
+        from .environments.meta_cartpole_origin_like import NoisyStatelessMetaCartPole
         return NoisyStatelessMetaCartPole(**meta_kwargs)
     if env_name == "s_cartpole_hard":
         from .environments.popgym_cartpole import StatelessCartPoleHard

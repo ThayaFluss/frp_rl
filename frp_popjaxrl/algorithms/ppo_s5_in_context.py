@@ -133,8 +133,12 @@ def make_train(config):
         frac = 1.0 - (count // (config["NUM_MINIBATCHES"] * config["UPDATE_EPOCHS"])) / config["NUM_UPDATES"]
         return config["LR"] * frac
 
-    
+
     def train(rng):
+        # Initialize max metric tracking
+        max_train_metric = float('-inf')
+        max_eval_metric = float('-inf')
+
         # INIT NETWORK
         if config["CONTINUOUS"]:
             network = ActorCriticS5(env.action_space(env_params).shape[0], config=config, ssm_init_fn=ssm_init_fn)
@@ -401,11 +405,19 @@ def make_train(config):
             eval_episode_done_count = eval_traj_batch.done.sum()
 
             def callback(train_metric, in_context_metric, train_done, eval_done):
+                nonlocal max_train_metric, max_eval_metric
+
+                # Update max values
+                max_train_metric = max(max_train_metric, float(train_metric))
+                max_eval_metric = max(max_eval_metric, float(in_context_metric))
+
                 print(f"Train metric: {train_metric}, In-context: {in_context_metric}")
                 print(f"Train episode done: {train_done}, Eval episode done: {eval_done}")
                 wandb.log({
                     "metric": train_metric,
                     "eval_metric": in_context_metric,
+                    "max_metric": max_train_metric,
+                    "max_eval_metric": max_eval_metric,
                     "train_episode_done_count": train_done,
                     "eval_episode_done_count": eval_done,
                 })

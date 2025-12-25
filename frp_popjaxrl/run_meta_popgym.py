@@ -8,10 +8,11 @@ from algorithms.ppo_s5_in_context import make_train as make_train_s5
 import pickle
 import os
 from flax.core import unfreeze
+import yaml
 
 import argparse
 
-def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_kwargs={}, norm_kwargs={}, use_few_shot=False):
+def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_kwargs={}, norm_kwargs={}):
     print("*"*10)
     rng = jax.random.PRNGKey(args.seed)
     rng, _rng = jax.random.split(rng)
@@ -124,8 +125,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             "train_metrics": metrics["train_metric"],
             "in_context_metrics": metrics["in_context_metric"],
         }
-        
-        # Add few_shot_metrics only if few-shot learning is enabled
+
         if "few_shot_metric" in metrics:
             info_dict["s5"]["few_shot_metrics"] = metrics["few_shot_metric"]
     
@@ -149,8 +149,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             "train_metrics": metrics["train_metric"],
             "in_context_metrics": metrics["in_context_metric"],
         }
-        
-        # Add few_shot_metrics only if few-shot learning is enabled
+
         if "few_shot_metric" in metrics:
             info_dict["gru"]["few_shot_metrics"] = metrics["few_shot_metric"]
     
@@ -162,8 +161,10 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
 
     # Save model checkpoint if requested
     if args.save_model == 1:
-        os.makedirs("checkpoints", exist_ok=True)
-        checkpoint_name = f"checkpoints/{env_name}_{arch}_{file_tag}_seed{args.seed}.pkl"
+        # Create experiment directory with timestamp
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        exp_dir = os.path.join("exp", timestamp)
+        os.makedirs(exp_dir, exist_ok=True)
 
         # Extract params from the output
         if arch == "s5":
@@ -177,25 +178,83 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         # Convert params to a serializable format
         params_dict = unfreeze(train_state.params)
 
-        # Create a copy of config without environment objects (which can't be pickled)
+        # Create a copy of config without environment objects (which can't be pickled/serialized)
         config_to_save = {k: v for k, v in config.items() if k not in ["ENV", "ENV_PARAMS", "EVAL_ENV", "EVAL_ENV_PARAMS"]}
 
-        # Save checkpoint with all necessary information
-        checkpoint = {
-            "params": params_dict,
-            "config": config_to_save,
+        # Add additional metadata to config
+        config_to_save.update({
             "arch": arch,
             "env_name": env_name,
             "env_kwargs": env_kwargs,
-            "meta_kwargs": meta_kwargs,
+            "meta_kwargs": {k: v for k, v in meta_kwargs.items() if k != "meta_rng"},  # Remove PRNG key
             "norm_kwargs": norm_kwargs,
             "seed": args.seed,
+        })
+
+        # Save config.yaml
+        config_yaml_path = os.path.join(exp_dir, "config.yaml")
+        with open(config_yaml_path, "w") as f:
+            yaml.dump(config_to_save, f, default_flow_style=False)
+        print(f"Config saved to {config_yaml_path}")
+
+        # Calculate number of updates
+        num_updates = int(config["TOTAL_TIMESTEPS"] // (config["NUM_STEPS"] * config["NUM_ENVS"]))
+
+        # Get the final eval metric (in_context_metric)
+        current_eval_metric = float(metrics["in_context_metric"][-1])
+
+        # Prepare checkpoint
+        checkpoint = {
+            "params": params_dict,
+            "eval_metric": current_eval_metric,
+            "num_updates": num_updates,
+            "timestamp": timestamp,
         }
 
-        with open(checkpoint_name, "wb") as f:
+        # Save model with iteration number
+        model_iter_name = os.path.join(exp_dir, f"model_{num_updates}_iter.pkl")
+        with open(model_iter_name, "wb") as f:
             pickle.dump(checkpoint, f)
+        print(f"Model saved to {model_iter_name}")
+        print(f"Eval metric (in_context): {current_eval_metric}")
 
-        print(f"Model saved to {checkpoint_name}")
+        # Save as model_best.pkl if this is the best model so far
+        best_model_path = os.path.join("exp", "model_best.pkl")
+        best_meta_path = os.path.join("exp", "best_model_info.yaml")
+        save_as_best = False
+
+        if os.path.exists(best_model_path):
+            # Load existing best model metadata
+            with open(best_meta_path, "r") as f:
+                best_info = yaml.safe_load(f)
+            best_eval_metric = best_info.get("eval_metric", float('-inf'))
+
+            if current_eval_metric > best_eval_metric:
+                save_as_best = True
+                print(f"New best model! Previous best: {best_eval_metric}, Current: {current_eval_metric}")
+        else:
+            # No existing best checkpoint, save this one
+            save_as_best = True
+            print(f"Saving first model_best with eval metric: {current_eval_metric}")
+
+        if save_as_best:
+            with open(best_model_path, "wb") as f:
+                pickle.dump(checkpoint, f)
+
+            # Save metadata about best model
+            best_info = {
+                "eval_metric": current_eval_metric,
+                "timestamp": timestamp,
+                "num_updates": num_updates,
+                "exp_dir": exp_dir,
+                "arch": arch,
+                "env_name": env_name,
+                "seed": args.seed,
+            }
+            with open(best_meta_path, "w") as f:
+                yaml.dump(best_info, f, default_flow_style=False)
+
+            print(f"Best model saved to {best_model_path}")
 
 
 if __name__ == "__main__":
@@ -215,9 +274,9 @@ if __name__ == "__main__":
                         help="Random seed (default: %(default)s)")
 
     ### For meta envs
-    parser.add_argument("--dim", type=int, default=64,
+    parser.add_argument("--dim", type=int, default=128,
                         help="Output dim of metaaugnetwork (default: %(default)s)")
-    parser.add_argument("--depth", type=int, default=2,
+    parser.add_argument("--depth", type=int, default=4,
                         help="Depth of MetaAugNetwork (default: %(default)s)")
     parser.add_argument("--max_depth", type=int, default=8,
                         help="Max depth metaaugnetwork, num parallel is 2**max_depth (default: %(default)s)")
@@ -229,8 +288,6 @@ if __name__ == "__main__":
     ### For evaluation
     parser.add_argument("--eval_method", type=str, default="tiling",
                         help="Evaluation method: tiling / padding / identity (default: %(default)s)")
-    parser.add_argument("--use_few_shot", type=int, default=0,
-                        help="Use few-shot learning: 1 or in-context only: 0 (default: %(default)s)")
     parser.add_argument("--num_trials", type=int, default=16,
                         help="Number of trials per episode (default: %(default)s)")
 
@@ -297,6 +354,4 @@ if __name__ == "__main__":
     }
 
     wandb.init(project=args.log_wandb, config=args)
-    # Pass use_few_shot directly to ensure consistency throughout the code
-    use_few_shot = args.use_few_shot == 1
-    run(args, args.num_runs, args.env, args.arch, env_kwargs=env_kwargs, meta_kwargs=meta_kwargs, norm_kwargs=norm_kwargs, use_few_shot=use_few_shot)
+    run(args, args.num_runs, args.env, args.arch, env_kwargs=env_kwargs, meta_kwargs=meta_kwargs, norm_kwargs=norm_kwargs)

@@ -334,19 +334,28 @@ def make_train(config):
 
             train_metric = safe_mean(traj_batch.info)
             in_context_metric = safe_mean(eval_traj_batch.info)
-            
-            def callback(train_metric, in_context_metric):
+
+            # Count episode done events (episode end = reset_env will be used next step)
+            train_episode_done_count = traj_batch.done.sum()
+            eval_episode_done_count = eval_traj_batch.done.sum()
+
+            def callback(train_metric, in_context_metric, train_done, eval_done):
                 print(f"Train metric: {train_metric}, In-context: {in_context_metric}")
+                print(f"Train episode done: {train_done}, Eval episode done: {eval_done}")
                 wandb.log({
                         "metric": train_metric,
                         "eval_metric": in_context_metric,
+                        "train_episode_done_count": train_done,
+                        "eval_episode_done_count": eval_done,
                 })
-            jax.debug.callback(callback, train_metric, in_context_metric)
+            jax.debug.callback(callback, train_metric, in_context_metric, train_episode_done_count, eval_episode_done_count)
 
             # Create metrics dictionary
             metrics_dict = {
                 "train_metric": train_metric,
                 "in_context_metric": safe_mean(eval_traj_batch.info),
+                "train_episode_done_count": train_episode_done_count,
+                "eval_episode_done_count": eval_episode_done_count,
             }
 
             return (train_state, env_state, last_obs, last_done, hstate, rng, words), metrics_dict

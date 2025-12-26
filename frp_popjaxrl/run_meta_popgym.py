@@ -5,10 +5,8 @@ from envs.meta_environment import create_meta_environment
 from envs.wrappers import AliasPrevActionV2
 from algorithms.ppo_gru_in_context import make_train as make_train_gru
 from algorithms.ppo_s5_in_context import make_train as make_train_s5
-import pickle
-import os
-from flax.core import unfreeze
-import yaml
+
+from utils.checkpoint import create_experiment_directory, save_config_yaml, save_checkpoint
 
 import argparse
 
@@ -116,7 +114,11 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         out_s5 = jax.block_until_ready(compiled_s5(rngs))
         run_s5_time = time.time() - t0
         print(f"s5 time: {run_s5_time}")
-        metrics = jax.tree_util.tree_map(lambda x: x.item() if hasattr(x, 'item') else x, out_s5[1])
+        # Keep arrays as arrays, only convert scalars
+        metrics = jax.tree_util.tree_map(
+            lambda x: x.item() if (hasattr(x, 'item') and (not hasattr(x, 'shape') or x.shape == ())) else x,
+            out_s5[1]
+        )
         
         # Create base info dictionary with common metrics
         info_dict["s5"] = {
@@ -140,7 +142,11 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         out_rnn = jax.block_until_ready(compiled_rnn(rngs))
         run_rnn_time = time.time() - t0
         print(f"gru time: {run_rnn_time}")
-        metrics = jax.tree_util.tree_map(lambda x: x.item() if hasattr(x, 'item') else x, out_rnn[1])
+        # Keep arrays as arrays, only convert scalars
+        metrics = jax.tree_util.tree_map(
+            lambda x: x.item() if (hasattr(x, 'item') and (not hasattr(x, 'shape') or x.shape == ())) else x,
+            out_rnn[1]
+        )
         
         # Create base info dictionary with common metrics
         info_dict["gru"] = {
@@ -162,9 +168,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
     # Save model checkpoint if requested
     if args.save_model == 1:
         # Create experiment directory with timestamp
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        exp_dir = os.path.join("exp", timestamp)
-        os.makedirs(exp_dir, exist_ok=True)
+        exp_dir = create_experiment_directory("exp")
 
         # Extract params from the output
         if arch == "s5":
@@ -175,86 +179,47 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         # Get the first run's state (in case of multiple runs)
         train_state = jax.tree_util.tree_map(lambda x: x[0] if len(x.shape) > 0 else x, runner_state[0])
 
-        # Convert params to a serializable format
-        params_dict = unfreeze(train_state.params)
-
-        # Create a copy of config without environment objects (which can't be pickled/serialized)
-        config_to_save = {k: v for k, v in config.items() if k not in ["ENV", "ENV_PARAMS", "EVAL_ENV", "EVAL_ENV_PARAMS"]}
-
-        # Add additional metadata to config
-        config_to_save.update({
-            "arch": arch,
-            "env_name": env_name,
-            "env_kwargs": env_kwargs,
-            "meta_kwargs": {k: v for k, v in meta_kwargs.items() if k != "meta_rng"},  # Remove PRNG key
-            "norm_kwargs": norm_kwargs,
-            "seed": args.seed,
-        })
+        # Filter meta_kwargs (remove meta_rng)
+        filtered_meta_kwargs = {k: v for k, v in meta_kwargs.items() if k != "meta_rng"}
 
         # Save config.yaml
-        config_yaml_path = os.path.join(exp_dir, "config.yaml")
-        with open(config_yaml_path, "w") as f:
-            yaml.dump(config_to_save, f, default_flow_style=False)
-        print(f"Config saved to {config_yaml_path}")
+        save_config_yaml(
+            config=config,
+            arch=arch,
+            env_name=env_name,
+            env_kwargs=env_kwargs,
+            meta_kwargs=filtered_meta_kwargs,
+            norm_kwargs=norm_kwargs,
+            seed=args.seed,
+            exp_dir=exp_dir
+        )
 
         # Calculate number of updates
         num_updates = int(config["TOTAL_TIMESTEPS"] // (config["NUM_STEPS"] * config["NUM_ENVS"]))
 
         # Get the final eval metric (in_context_metric)
-        current_eval_metric = float(metrics["in_context_metric"][-1])
+        # Handle both array and scalar cases (fallback for safety)
+        in_context_metric = metrics["in_context_metric"]
+        try:
+            # Try to get the last element if it's an array
+            current_eval_metric = float(in_context_metric[-1])
+        except (TypeError, IndexError):
+            # If it's already a scalar, use it directly
+            current_eval_metric = float(in_context_metric)
 
-        # Prepare checkpoint
-        checkpoint = {
-            "params": params_dict,
-            "eval_metric": current_eval_metric,
-            "num_updates": num_updates,
-            "timestamp": timestamp,
-        }
-
-        # Save model with iteration number
-        model_iter_name = os.path.join(exp_dir, f"model_{num_updates}_iter.pkl")
-        with open(model_iter_name, "wb") as f:
-            pickle.dump(checkpoint, f)
-        print(f"Model saved to {model_iter_name}")
-        print(f"Eval metric (in_context): {current_eval_metric}")
-
-        # Save as model_best.pkl if this is the best model so far
-        best_model_path = os.path.join("exp", "model_best.pkl")
-        best_meta_path = os.path.join("exp", "best_model_info.yaml")
-        save_as_best = False
-
-        if os.path.exists(best_model_path):
-            # Load existing best model metadata
-            with open(best_meta_path, "r") as f:
-                best_info = yaml.safe_load(f)
-            best_eval_metric = best_info.get("eval_metric", float('-inf'))
-
-            if current_eval_metric > best_eval_metric:
-                save_as_best = True
-                print(f"New best model! Previous best: {best_eval_metric}, Current: {current_eval_metric}")
-        else:
-            # No existing best checkpoint, save this one
-            save_as_best = True
-            print(f"Saving first model_best with eval metric: {current_eval_metric}")
-
-        if save_as_best:
-            with open(best_model_path, "wb") as f:
-                pickle.dump(checkpoint, f)
-
-            # Save metadata about best model
-            best_info = {
-                "eval_metric": current_eval_metric,
-                "timestamp": timestamp,
-                "num_updates": num_updates,
-                "exp_dir": exp_dir,
-                "arch": arch,
-                "env_name": env_name,
-                "seed": args.seed,
-            }
-            with open(best_meta_path, "w") as f:
-                yaml.dump(best_info, f, default_flow_style=False)
-
-            print(f"Best model saved to {best_model_path}")
+        # Save checkpoint
+        save_checkpoint(
+            params=train_state.params,
+            config=config,
+            arch=arch,
+            env_name=env_name,
+            env_kwargs=env_kwargs,
+            meta_kwargs=filtered_meta_kwargs,
+            norm_kwargs=norm_kwargs,
+            eval_metric=current_eval_metric,
+            num_updates=num_updates,
+            exp_dir=exp_dir
+        )
 
 
 if __name__ == "__main__":

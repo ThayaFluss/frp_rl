@@ -25,6 +25,7 @@ import numpy as np
 from flax.core import freeze
 from gymnax.environments import spaces
 
+from utils.checkpoint import load_checkpoint
 from algorithms.ppo_gru_in_context import ActorCriticRNN, ScannedRNN
 from algorithms.ppo_s5_in_context import ActorCriticS5
 from algorithms.ppo_s5_in_context import init_S5SSM, make_DPLR_HiPPO, StackedEncoderModel
@@ -73,17 +74,16 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
     """
     # --- Load checkpoint and setup environment ---
     print(f"Loading checkpoint from {checkpoint_path}")
-    with open(checkpoint_path, "rb") as f:
-        checkpoint = pickle.load(f)
+    checkpoint, metadata = load_checkpoint(checkpoint_path)
 
     # Extract checkpoint information
     params_dict = checkpoint["params"]
-    config = checkpoint["config"]
-    arch = checkpoint["arch"]
-    env_name = checkpoint["env_name"]
-    env_kwargs = checkpoint["env_kwargs"]
-    meta_kwargs = checkpoint["meta_kwargs"].copy()
-    norm_kwargs = checkpoint["norm_kwargs"]
+    config = metadata["config"]
+    arch = metadata["arch"]
+    env_name = metadata["env_name"]
+    env_kwargs = metadata["env_kwargs"]
+    meta_kwargs = metadata["meta_kwargs"].copy()
+    norm_kwargs = metadata["norm_kwargs"]
 
     # Override num_trials if specified
     if num_trials_eval is not None:

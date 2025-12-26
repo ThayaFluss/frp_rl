@@ -27,11 +27,12 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
     rng, _rng = jax.random.split(rng)
     eval_meta_kwargs["meta_rng"] = _rng
     eval_meta_kwargs["meta_eval"] = True
+    eval_meta_kwargs["num_trials_per_episode"] = args.eval_num_trials
 
     # Set up eval environment augmentation method
-    if args.eval_method == "padding":      
+    if args.eval_method == "padding":
         eval_meta_kwargs["meta_const_aug"] = "padding"
-    elif args.eval_method == "tiling":      
+    elif args.eval_method == "tiling":
         eval_meta_kwargs["meta_const_aug"] = "tiling"
     elif args.eval_method == "identity":
         eval_meta_kwargs["meta_const_aug"] = "identity"
@@ -255,6 +256,8 @@ if __name__ == "__main__":
                         help="Evaluation method: tiling / padding / identity (default: %(default)s)")
     parser.add_argument("--num_trials", type=int, default=16,
                         help="Number of trials per episode (default: %(default)s)")
+    parser.add_argument("--eval_num_trials", type=int, default=16,
+                        help="Number of trials per episode for evaluation (default: %(default)s)")
 
     ### For gymnax enviroments. Unnecessary  for popgym.
     parser.add_argument("--norm_strategy", type=str, default="fixed",

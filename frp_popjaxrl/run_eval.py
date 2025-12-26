@@ -6,22 +6,25 @@ in-context learning performance over multiple trials.
 
 Example usage:
     python run_eval.py --checkpoint=checkpoints/cartpole_gru_seed42.pkl \
-                       --num_trials_eval=32 \
-                       --num_episodes=10
+                       --eval_num_trials=32 \
+                       --eval_method=tiling \
+                       --num_episodes=10 \
+                       --log_wandb=popgym_eval
 
 Outputs:
     - Console: Per-episode and per-trial statistics
     - PNG: Plot of mean return ± std across trials
     - CSV: Trial-wise return data
+    - Wandb: Per-trial mean/std logged with trial number as x-axis
 """
 
 import argparse
-import pickle
 
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
+import wandb
 from flax.core import freeze
 from gymnax.environments import spaces
 
@@ -45,7 +48,7 @@ class Transition:
         self.info = info
 
 
-def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=0):
+def evaluate_model(checkpoint_path, eval_num_trials=16, num_episodes=10, seed=0, eval_method="tiling", log_wandb=None):
     """
     Evaluate a saved model checkpoint and track per-trial returns.
 
@@ -55,12 +58,15 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
     3. Tracks returns for each trial within episodes
     4. Computes statistics (mean ± std) across episodes
     5. Saves results as plot (PNG) and data (CSV)
+    6. Optionally logs results to wandb
 
     Args:
         checkpoint_path: Path to checkpoint (.pkl file)
-        num_trials_eval: Number of trials per episode (default: use checkpoint value)
+        eval_num_trials: Number of trials per episode (default: 16)
         num_episodes: Number of episodes to evaluate (default: 10)
         seed: Random seed for evaluation (default: 0)
+        eval_method: Evaluation method - tiling/padding/identity (default: "tiling")
+        log_wandb: Wandb project name for logging (default: None, no logging)
 
     Returns:
         dict: Evaluation results including trial_returns, trial_means, trial_stds
@@ -68,10 +74,25 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
     Example:
         results = evaluate_model(
             "checkpoints/cartpole_gru_seed42.pkl",
-            num_trials_eval=32,
-            num_episodes=10
+            eval_num_trials=32,
+            num_episodes=10,
+            eval_method="tiling",
+            log_wandb="popgym_eval"
         )
     """
+    # --- Initialize wandb if requested ---
+    if log_wandb is not None:
+        wandb.init(
+            project=log_wandb,
+            config={
+                "checkpoint_path": checkpoint_path,
+                "eval_num_trials": eval_num_trials,
+                "num_episodes": num_episodes,
+                "seed": seed,
+                "eval_method": eval_method,
+            }
+        )
+
     # --- Load checkpoint and setup environment ---
     print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint, metadata = load_checkpoint(checkpoint_path)
@@ -85,12 +106,9 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
     meta_kwargs = metadata["meta_kwargs"].copy()
     norm_kwargs = metadata["norm_kwargs"]
 
-    # Override num_trials if specified
-    if num_trials_eval is not None:
-        meta_kwargs["num_trials_per_episode"] = num_trials_eval
-        print(f"Using num_trials_per_episode={num_trials_eval} for evaluation")
-    else:
-        print(f"Using num_trials_per_episode={meta_kwargs.get('num_trials_per_episode', 16)} from checkpoint")
+    # Set num_trials for evaluation
+    meta_kwargs["num_trials_per_episode"] = eval_num_trials
+    print(f"Using num_trials_per_episode={eval_num_trials} for evaluation")
 
     # Create evaluation environment
     print(f"Creating evaluation environment: {env_name}")
@@ -99,8 +117,14 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
     meta_kwargs["meta_rng"] = _rng
     meta_kwargs["meta_eval"] = True
 
-    # Use tiling augmentation for evaluation by default
-    meta_kwargs["meta_const_aug"] = "tiling"
+    # Set up eval environment augmentation method
+    if eval_method == "padding":
+        meta_kwargs["meta_const_aug"] = "padding"
+    elif eval_method == "tiling":
+        meta_kwargs["meta_const_aug"] = "tiling"
+    elif eval_method == "identity":
+        meta_kwargs["meta_const_aug"] = "identity"
+    print(f"Using eval_method={eval_method}")
 
     env = create_meta_environment(env_name, env_kwargs, meta_kwargs, norm_kwargs)
     env = AliasPrevActionV2(env)
@@ -297,6 +321,24 @@ def evaluate_model(checkpoint_path, num_trials_eval=None, num_episodes=10, seed=
     for trial_idx in range(num_trials):
         print(f"{trial_idx:5d} | {trial_means[trial_idx]:11.2f} | {trial_stds[trial_idx]:10.2f}")
 
+    # --- Log to wandb if requested ---
+    if log_wandb is not None:
+        # Log overall statistics
+        wandb.log({
+            "overall/mean_return": np.mean(episode_returns),
+            "overall/std_return": np.std(episode_returns),
+            "overall/mean_length": np.mean(episode_lengths),
+            "overall/std_length": np.std(episode_lengths),
+        })
+
+        # Log per-trial statistics with trial number as x-axis
+        for trial_idx in range(num_trials):
+            wandb.log({
+                "trial/mean_return": trial_means[trial_idx],
+                "trial/std_return": trial_stds[trial_idx],
+                "trial/trial_number": trial_idx,
+            })
+
     # --- Generate and save visualization ---
     # Plot: Trial number (x-axis) vs Return (y-axis) with mean ± std
     plt.figure(figsize=(10, 6))
@@ -348,19 +390,25 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate a saved model checkpoint")
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to checkpoint file (e.g., checkpoints/cartpole_gru_seed42.pkl)")
-    parser.add_argument("--num_trials_eval", type=int, default=None,
-                        help="Number of trials per episode for evaluation (default: use checkpoint value)")
+    parser.add_argument("--eval_num_trials", type=int, default=16,
+                        help="Number of trials per episode for evaluation (default: %(default)s)")
+    parser.add_argument("--eval_method", type=str, default="tiling",
+                        help="Evaluation method: tiling / padding / identity (default: %(default)s)")
     parser.add_argument("--num_episodes", type=int, default=10,
                         help="Number of episodes to evaluate (default: %(default)s)")
     parser.add_argument("--seed", type=int, default=0,
                         help="Random seed for evaluation (default: %(default)s)")
+    parser.add_argument("--log_wandb", type=str, default="popgym_eval",
+                        help="Wandb project name for logging (default: %(default)s). Set to empty string to disable.")
 
     args = parser.parse_args()
 
     # Run evaluation
     results = evaluate_model(
         checkpoint_path=args.checkpoint,
-        num_trials_eval=args.num_trials_eval,
+        eval_num_trials=args.eval_num_trials,
         num_episodes=args.num_episodes,
-        seed=args.seed
+        seed=args.seed,
+        eval_method=args.eval_method,
+        log_wandb=args.log_wandb if args.log_wandb else None
     )

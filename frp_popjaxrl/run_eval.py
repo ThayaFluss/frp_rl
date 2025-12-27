@@ -1,8 +1,8 @@
 """
 Evaluation script for saved model checkpoints.
 
-This script evaluates trained models and tracks per-trial returns to analyze
-in-context learning performance over multiple trials.
+This script evaluates trained models and tracks per-trial statistics (returns, steps,
+success rates) to analyze in-context learning performance over multiple trials.
 
 Example usage:
     python run_eval.py --checkpoint=checkpoints/cartpole_gru_seed42.pkl \
@@ -12,10 +12,10 @@ Example usage:
                        --log_wandb=popgym_eval
 
 Outputs:
-    - Console: Per-episode and per-trial statistics
-    - PNG: Plot of mean return ± std across trials
-    - CSV: Trial-wise return data
-    - Wandb: Per-trial mean/std logged with trial number as x-axis
+    - Console: Per-episode and per-trial statistics (returns, steps, success rates)
+    - PNG: Plots of mean return/steps/success rate ± std across trials
+    - CSV: Trial-wise statistics data (returns, steps, success rates)
+    - Wandb: Per-trial mean/std for all metrics logged with trial number as x-axis
 """
 
 import argparse
@@ -50,14 +50,14 @@ class Transition:
 
 def evaluate_model(checkpoint_path, eval_num_trials=16, num_episodes=10, seed=0, eval_method="tiling", log_wandb=None):
     """
-    Evaluate a saved model checkpoint and track per-trial returns.
+    Evaluate a saved model checkpoint and track per-trial statistics.
 
     This function:
     1. Loads a trained model from checkpoint
     2. Evaluates it over multiple episodes
-    3. Tracks returns for each trial within episodes
-    4. Computes statistics (mean ± std) across episodes
-    5. Saves results as plot (PNG) and data (CSV)
+    3. Tracks returns, step counts, and success rates for each trial within episodes
+    4. Computes statistics (mean ± std) across episodes for each trial
+    5. Saves results as plots (PNG) and data (CSV)
     6. Optionally logs results to wandb
 
     Args:
@@ -69,7 +69,10 @@ def evaluate_model(checkpoint_path, eval_num_trials=16, num_episodes=10, seed=0,
         log_wandb: Wandb project name for logging (default: None, no logging)
 
     Returns:
-        dict: Evaluation results including trial_returns, trial_means, trial_stds
+        dict: Evaluation results including:
+            - trial_returns, trial_return_means, trial_return_stds: Trial return statistics
+            - trial_steps, trial_step_means, trial_step_stds: Trial step count statistics
+            - trial_successes, trial_success_rates, trial_success_stds: Trial success statistics
 
     Example:
         results = evaluate_model(
@@ -264,7 +267,11 @@ def evaluate_model(checkpoint_path, eval_num_trials=16, num_episodes=10, seed=0,
 
             carry = (rng, obs_new, env_state_new, hstate, done_new, episode_return, episode_length)
             # Return reward and trial_num for post-processing
-            return carry, (reward[0], current_trial_num, done[0])
+            # Note: current_trial_num is AFTER auto-increment, so if env_done=True,
+            # trial_num has already been incremented. We need to use the trial_num
+            # BEFORE the step to correctly attribute the termination reward.
+            trial_num_before_step = env_state.env_state.trial_num[0]
+            return carry, (reward[0], trial_num_before_step, done[0])
 
         # Run for maximum steps (this should be enough for the episode to finish)
         carry = (rng, obs, env_state, hstate, done, episode_return, episode_length)
@@ -272,54 +279,92 @@ def evaluate_model(checkpoint_path, eval_num_trials=16, num_episodes=10, seed=0,
             step_fn, carry, None, max_steps
         )
 
-        # --- Calculate per-trial returns from step data ---
+        # --- Calculate per-trial statistics from step data ---
         rewards, trial_nums, dones = step_data
 
         # Compute trial returns using vectorized operations
         # For each trial, sum rewards collected during that trial
         def compute_trial_return(trial_idx):
-            # Sum rewards where trial_num equals trial_idx and not done before
+            # Sum rewards where trial_num equals trial_idx AND not done before this step
+            # We use ~dones to exclude steps after the episode has ended
+            # Note: The termination reward (-1.0) is included because it occurs when done[0]=False
+            # (the step that CAUSES termination). Steps after done[0]=True are excluded.
             mask = (trial_nums == trial_idx) & (~dones)
             return jnp.sum(rewards * mask)
 
-        trial_returns = jax.vmap(compute_trial_return)(jnp.arange(num_trials))
+        # Compute trial step counts
+        def compute_trial_steps(trial_idx):
+            # Count steps where trial_num equals trial_idx AND not done before this step
+            # We use ~dones to exclude steps after the episode has ended
+            # (lax.scan continues for max_steps even after episode ends)
+            mask = (trial_nums == trial_idx) & (~dones)
+            return jnp.sum(mask)
 
-        return episode_return[0], episode_length[0], trial_returns
+        # Compute trial success (1.0 if trial completed successfully, 0.0 otherwise)
+        def compute_trial_success(trial_idx):
+            # A trial is successful if its return is close to 1.0 (max possible)
+            # This happens when the agent survives max_steps_in_episode
+            trial_return = compute_trial_return(trial_idx)
+            # Success threshold: return >= 0.99 (accounting for numerical precision)
+            return jnp.where(trial_return >= 0.99, 1.0, 0.0)
+
+        trial_returns = jax.vmap(compute_trial_return)(jnp.arange(num_trials))
+        trial_steps = jax.vmap(compute_trial_steps)(jnp.arange(num_trials))
+        trial_successes = jax.vmap(compute_trial_success)(jnp.arange(num_trials))
+
+        return episode_return[0], episode_length[0], trial_returns, trial_steps, trial_successes
 
     all_trial_returns = []  # Store trial returns for all episodes
+    all_trial_steps = []  # Store trial step counts for all episodes
+    all_trial_successes = []  # Store trial success flags for all episodes
 
     # Evaluate over multiple episodes
     for episode in range(num_episodes):
         rng, _rng = jax.random.split(rng)
-        episode_return, episode_length, trial_returns = evaluate_episode(_rng, env_params)
+        episode_return, episode_length, trial_returns, trial_steps, trial_successes = evaluate_episode(_rng, env_params)
 
         episode_returns.append(float(episode_return))
         episode_lengths.append(int(episode_length))
         all_trial_returns.append(np.array(trial_returns))
+        all_trial_steps.append(np.array(trial_steps))
+        all_trial_successes.append(np.array(trial_successes))
 
         print(f"Episode {episode+1}: Return = {episode_return:.2f}, Length = {episode_length}")
 
     # --- Compute statistics across episodes ---
     all_trial_returns = np.array(all_trial_returns)  # Shape: (num_episodes, num_trials)
+    all_trial_steps = np.array(all_trial_steps)  # Shape: (num_episodes, num_trials)
+    all_trial_successes = np.array(all_trial_successes)  # Shape: (num_episodes, num_trials)
     num_trials = all_trial_returns.shape[1]
 
     # Calculate mean and std across episodes for each trial
-    trial_means = np.mean(all_trial_returns, axis=0)
-    trial_stds = np.std(all_trial_returns, axis=0)
+    trial_return_means = np.mean(all_trial_returns, axis=0)
+    trial_return_stds = np.std(all_trial_returns, axis=0)
+
+    trial_step_means = np.mean(all_trial_steps, axis=0)
+    trial_step_stds = np.std(all_trial_steps, axis=0)
+
+    # Success rate: mean of success flags (0 or 1) gives success rate
+    trial_success_rates = np.mean(all_trial_successes, axis=0)
+    trial_success_stds = np.std(all_trial_successes, axis=0)
 
     # Print summary statistics
-    print("\n" + "="*50)
+    print("\n" + "="*70)
     print("Evaluation Summary:")
-    print(f"Mean Return: {np.mean(episode_returns):.2f} ± {np.std(episode_returns):.2f}")
-    print(f"Mean Length: {np.mean(episode_lengths):.2f} ± {np.std(episode_lengths):.2f}")
-    print("="*50)
+    print(f"Mean Episode Return: {np.mean(episode_returns):.2f} ± {np.std(episode_returns):.2f}")
+    print(f"Mean Episode Length: {np.mean(episode_lengths):.2f} ± {np.std(episode_lengths):.2f}")
+    print("="*70)
 
     # Print per-trial statistics
-    print("\nPer-Trial Statistics:")
-    print("Trial | Mean Return | Std Return")
-    print("-" * 40)
+    print("\nPer-Trial Statistics (averaged across episodes):")
+    print("Trial | Mean Return | Std Return | Mean Steps | Std Steps | Success Rate")
+    print("-" * 78)
     for trial_idx in range(num_trials):
-        print(f"{trial_idx:5d} | {trial_means[trial_idx]:11.2f} | {trial_stds[trial_idx]:10.2f}")
+        print(f"{trial_idx:5d} | {trial_return_means[trial_idx]:11.2f} | "
+              f"{trial_return_stds[trial_idx]:10.2f} | "
+              f"{trial_step_means[trial_idx]:10.1f} | "
+              f"{trial_step_stds[trial_idx]:9.1f} | "
+              f"{trial_success_rates[trial_idx]:12.2%}")
 
     # --- Log to wandb if requested ---
     if log_wandb is not None:
@@ -334,43 +379,82 @@ def evaluate_model(checkpoint_path, eval_num_trials=16, num_episodes=10, seed=0,
         # Log per-trial statistics with trial number as x-axis
         for trial_idx in range(num_trials):
             wandb.log({
-                "trial/mean_return": trial_means[trial_idx],
-                "trial/std_return": trial_stds[trial_idx],
+                "trial/mean_return": trial_return_means[trial_idx],
+                "trial/std_return": trial_return_stds[trial_idx],
+                "trial/mean_steps": trial_step_means[trial_idx],
+                "trial/std_steps": trial_step_stds[trial_idx],
+                "trial/success_rate": trial_success_rates[trial_idx],
+                "trial/success_std": trial_success_stds[trial_idx],
                 "trial/trial_number": trial_idx,
             })
 
     # --- Generate and save visualization ---
-    # Plot: Trial number (x-axis) vs Return (y-axis) with mean ± std
-    plt.figure(figsize=(10, 6))
     trial_numbers = np.arange(num_trials)
 
-    plt.plot(trial_numbers, trial_means, 'b-', linewidth=2, label='Mean Return')
-    plt.fill_between(trial_numbers,
-                     trial_means - trial_stds,
-                     trial_means + trial_stds,
-                     alpha=0.3,
-                     label='±1 Std')
+    # Create a figure with 3 subplots (returns, steps, success rate)
+    _, axes = plt.subplots(3, 1, figsize=(12, 12))
 
-    plt.xlabel('Trial Number', fontsize=12)
-    plt.ylabel('Return', fontsize=12)
-    plt.title(f'Return vs Trial Number (N={num_episodes} episodes)', fontsize=14)
-    plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=10)
+    # Plot 1: Returns
+    axes[0].plot(trial_numbers, trial_return_means, 'b-', linewidth=2, label='Mean Return')
+    axes[0].fill_between(trial_numbers,
+                         trial_return_means - trial_return_stds,
+                         trial_return_means + trial_return_stds,
+                         alpha=0.3,
+                         label='±1 Std')
+    axes[0].set_xlabel('Trial Number', fontsize=12)
+    axes[0].set_ylabel('Return', fontsize=12)
+    axes[0].set_title(f'Return vs Trial Number (N={num_episodes} episodes)', fontsize=14)
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend(fontsize=10)
+
+    # Plot 2: Steps
+    axes[1].plot(trial_numbers, trial_step_means, 'g-', linewidth=2, label='Mean Steps')
+    axes[1].fill_between(trial_numbers,
+                         trial_step_means - trial_step_stds,
+                         trial_step_means + trial_step_stds,
+                         alpha=0.3,
+                         label='±1 Std')
+    axes[1].set_xlabel('Trial Number', fontsize=12)
+    axes[1].set_ylabel('Steps', fontsize=12)
+    axes[1].set_title(f'Steps vs Trial Number (N={num_episodes} episodes)', fontsize=14)
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend(fontsize=10)
+
+    # Plot 3: Success Rate
+    axes[2].plot(trial_numbers, trial_success_rates, 'r-', linewidth=2, label='Success Rate')
+    axes[2].fill_between(trial_numbers,
+                         trial_success_rates - trial_success_stds,
+                         trial_success_rates + trial_success_stds,
+                         alpha=0.3,
+                         label='±1 Std')
+    axes[2].set_xlabel('Trial Number', fontsize=12)
+    axes[2].set_ylabel('Success Rate', fontsize=12)
+    axes[2].set_title(f'Success Rate vs Trial Number (N={num_episodes} episodes)', fontsize=14)
+    axes[2].set_ylim([-0.05, 1.05])  # Set y-axis range for success rate
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend(fontsize=10)
+
     plt.tight_layout()
 
     # Save plot as PNG
-    plot_filename = checkpoint_path.replace('.pkl', f'_trial_returns_n{num_trials}.png')
+    plot_filename = checkpoint_path.replace('.pkl', f'_trial_stats_n{num_trials}.png')
     plt.savefig(plot_filename, dpi=150)
     print(f"\nPlot saved to: {plot_filename}")
     plt.close()
 
     # --- Save data to CSV ---
-    csv_filename = checkpoint_path.replace('.pkl', f'_trial_returns_n{num_trials}.csv')
+    csv_filename = checkpoint_path.replace('.pkl', f'_trial_stats_n{num_trials}.csv')
     with open(csv_filename, 'w', encoding='utf-8') as f:
-        f.write("Trial,Mean_Return,Std_Return\n")
+        f.write("Trial,Mean_Return,Std_Return,Mean_Steps,Std_Steps,Success_Rate,Success_Std\n")
         for trial_idx in range(num_trials):
-            f.write(f"{trial_idx},{trial_means[trial_idx]:.6f},{trial_stds[trial_idx]:.6f}\n")
-    print(f"Trial return data saved to: {csv_filename}")
+            f.write(f"{trial_idx},"
+                   f"{trial_return_means[trial_idx]:.6f},"
+                   f"{trial_return_stds[trial_idx]:.6f},"
+                   f"{trial_step_means[trial_idx]:.6f},"
+                   f"{trial_step_stds[trial_idx]:.6f},"
+                   f"{trial_success_rates[trial_idx]:.6f},"
+                   f"{trial_success_stds[trial_idx]:.6f}\n")
+    print(f"Trial statistics data saved to: {csv_filename}")
 
     return {
         "returns": episode_returns,
@@ -380,8 +464,14 @@ def evaluate_model(checkpoint_path, eval_num_trials=16, num_episodes=10, seed=0,
         "mean_length": np.mean(episode_lengths),
         "std_length": np.std(episode_lengths),
         "trial_returns": all_trial_returns,
-        "trial_means": trial_means,
-        "trial_stds": trial_stds,
+        "trial_return_means": trial_return_means,
+        "trial_return_stds": trial_return_stds,
+        "trial_steps": all_trial_steps,
+        "trial_step_means": trial_step_means,
+        "trial_step_stds": trial_step_stds,
+        "trial_successes": all_trial_successes,
+        "trial_success_rates": trial_success_rates,
+        "trial_success_stds": trial_success_stds,
     }
 
 

@@ -1,17 +1,44 @@
 import jax
 import jax.numpy as jnp
 import time
-from envs.meta_environment import create_meta_environment
+import logging
 from envs.wrappers import AliasPrevActionV2
-from algorithms.ppo_gru_in_context import make_train as make_train_gru
-from algorithms.ppo_s5_in_context import make_train as make_train_s5
 
 from utils.checkpoint import create_experiment_directory, save_config_yaml, save_checkpoint
 
 import argparse
 
-def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_kwargs={}, norm_kwargs={}):
-    print("*"*10)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# Dispatcher: imports will be selected based on --mode flag
+
+def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_kwargs={}, norm_kwargs={}, mode="v1"):
+    """
+    Run training with specified implementation mode.
+
+    Args:
+        mode: "v1" (original) or "lazy" (lazy evaluation)
+    """
+    logger.info("="*50)
+    logger.info(f"Running in mode: {mode}")
+    logger.info("="*50)
+
+    # Dispatcher: import appropriate modules based on mode
+    if mode == "lazy":
+        from envs.meta_environment_lazy import create_meta_environment
+        from algorithms.ppo_gru_in_context_lazy import make_train as make_train_gru
+        from algorithms.ppo_s5_in_context_lazy import make_train as make_train_s5
+    else:  # v1
+        from envs.meta_environment import create_meta_environment
+        from algorithms.ppo_gru_in_context import make_train as make_train_gru
+        from algorithms.ppo_s5_in_context import make_train as make_train_s5
+
     rng = jax.random.PRNGKey(args.seed)
     rng, _rng = jax.random.split(rng)
     meta_kwargs["meta_rng"] = _rng
@@ -105,26 +132,41 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
     info_dict = {}
 
     if arch == "s5":
+        logger.info("Starting S5 compilation...")
         train_vjit_s5 = jax.jit(jax.vmap(make_train_s5(config)))
         t0 = time.time()
         compiled_s5 = train_vjit_s5.lower(rngs).compile()
         compile_s5_time = time.time() - t0
-        print(f"s5 compile time: {compile_s5_time}")
+        logger.info(f"S5 compilation completed in {compile_s5_time:.2f}s")
 
+        logger.info("Starting S5 training execution...")
         t0 = time.time()
         out_s5 = jax.block_until_ready(compiled_s5(rngs))
         run_s5_time = time.time() - t0
-        print(f"s5 time: {run_s5_time}")
+        logger.info(f"S5 training completed in {run_s5_time:.2f}s")
+
+        # Calculate total time
+        total_s5_time = compile_s5_time + run_s5_time
+
+        # Display summary
+        logger.info("="*50)
+        logger.info("S5 Training Summary:")
+        logger.info(f"  Compile time:  {compile_s5_time:>8.2f}s")
+        logger.info(f"  Training time: {run_s5_time:>8.2f}s")
+        logger.info(f"  Total time:    {total_s5_time:>8.2f}s")
+        logger.info("="*50)
+
         # Keep arrays as arrays, only convert scalars
         metrics = jax.tree_util.tree_map(
             lambda x: x.item() if (hasattr(x, 'item') and (not hasattr(x, 'shape') or x.shape == ())) else x,
             out_s5[1]
         )
-        
+
         # Create base info dictionary with common metrics
         info_dict["s5"] = {
             "compile_s5_time": compile_s5_time,
             "run_s5_time": run_s5_time,
+            "total_s5_time": total_s5_time,
             "train_metrics": metrics["train_metric"],
             "in_context_metrics": metrics["in_context_metric"],
         }
@@ -133,26 +175,41 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             info_dict["s5"]["few_shot_metrics"] = metrics["few_shot_metric"]
     
     elif arch == "gru":
+        logger.info("Starting GRU compilation...")
         train_vjit_rnn = jax.jit(jax.vmap(make_train_gru(config)))
         t0 = time.time()
         compiled_rnn = train_vjit_rnn.lower(rngs).compile()
         compile_rnn_time = time.time() - t0
-        print(f"gru compile time: {compile_rnn_time}")
+        logger.info(f"GRU compilation completed in {compile_rnn_time:.2f}s")
 
+        logger.info("Starting GRU training execution...")
         t0 = time.time()
         out_rnn = jax.block_until_ready(compiled_rnn(rngs))
         run_rnn_time = time.time() - t0
-        print(f"gru time: {run_rnn_time}")
+        logger.info(f"GRU training completed in {run_rnn_time:.2f}s")
+
+        # Calculate total time
+        total_rnn_time = compile_rnn_time + run_rnn_time
+
+        # Display summary
+        logger.info("="*50)
+        logger.info("GRU Training Summary:")
+        logger.info(f"  Compile time:  {compile_rnn_time:>8.2f}s")
+        logger.info(f"  Training time: {run_rnn_time:>8.2f}s")
+        logger.info(f"  Total time:    {total_rnn_time:>8.2f}s")
+        logger.info("="*50)
+
         # Keep arrays as arrays, only convert scalars
         metrics = jax.tree_util.tree_map(
             lambda x: x.item() if (hasattr(x, 'item') and (not hasattr(x, 'shape') or x.shape == ())) else x,
             out_rnn[1]
         )
-        
+
         # Create base info dictionary with common metrics
         info_dict["gru"] = {
             "compile_rnn_time": compile_rnn_time,
             "run_rnn_time": run_rnn_time,
+            "total_rnn_time": total_rnn_time,
             "train_metrics": metrics["train_metric"],
             "in_context_metrics": metrics["in_context_metric"],
         }
@@ -301,6 +358,10 @@ if __name__ == "__main__":
     parser.add_argument("--s5_do_gtrxl_norm", type=int, default=0,
                         help="S5 GTrXL normalization: 0 or 1 (default: %(default)s)")
 
+    ### Dispatcher: select implementation version
+    parser.add_argument("--mode", type=str, default="v1",
+                        help="Implementation mode: v1 (original) or lazy (lazy evaluation) (default: %(default)s)")
+
     args = parser.parse_args()
     
     # Meta environment specific kwargs
@@ -322,4 +383,4 @@ if __name__ == "__main__":
     }
 
     wandb.init(project=args.log_wandb, config=args)
-    run(args, args.num_runs, args.env, args.arch, env_kwargs=env_kwargs, meta_kwargs=meta_kwargs, norm_kwargs=norm_kwargs)
+    run(args, args.num_runs, args.env, args.arch, env_kwargs=env_kwargs, meta_kwargs=meta_kwargs, norm_kwargs=norm_kwargs, mode=args.mode)

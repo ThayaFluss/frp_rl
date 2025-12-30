@@ -1,98 +1,38 @@
+"""
+Unified PPO training with in-context learning (lazy word creation).
+
+This module supports both GRU and S5 encoders via the MODEL_TYPE configuration parameter.
+Words are created lazily from base matrices, reducing memory usage and computation.
+"""
+import logging
+from typing import NamedTuple, Dict
+
 import jax
 import jax.numpy as jnp
-import flax.linen as nn
 import numpy as np
 import optax
-from flax.linen.initializers import constant, orthogonal
-from typing import Sequence, NamedTuple, Dict
-from flax.training.train_state import TrainState
-import distrax
-from envs.wrappers import LogWrapper
-import functools
-from gymnax.environments import spaces
 import wandb
-import logging
+from flax.training.train_state import TrainState
+from gymnax.environments import spaces
+
+from envs.wrappers import LogWrapper
 from frp.orthogonal_lazy import create_base_matrices
+
+from .ppo_common import (
+    Transition,
+    make_linear_schedule,
+    calculate_gae,
+    safe_mean,
+    create_minibatches,
+    setup_config,
+    create_network,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class ScannedRNN(nn.Module):
-
-  @functools.partial(
-    nn.scan,
-    variable_broadcast='params',
-    in_axes=0,
-    out_axes=0,
-    split_rngs={'params': False})
-  @nn.compact
-  def __call__(self, carry, x):
-    """Applies the module."""
-    rnn_state = carry
-    ins, resets = x
-    rnn_state = jnp.where(resets[:, np.newaxis], self.initialize_carry(ins.shape[0], ins.shape[1]), rnn_state)
-    features = rnn_state[0].shape[-1]
-    new_rnn_state, y = nn.GRUCell(features)(rnn_state, ins)
-    return new_rnn_state, y
-
-  @staticmethod
-  def initialize_carry(batch_size, hidden_size):
-    return nn.GRUCell(hidden_size, parent=None).initialize_carry(
-        jax.random.PRNGKey(0), (batch_size, hidden_size))
-
-class ActorCriticRNN(nn.Module):
-    action_dim: Sequence[int]
-    config: Dict
-
-    @nn.compact
-    def __call__(self, hidden, x):
-        obs, dones = x
-        if self.config.get("NO_RESET"):
-            dones = jnp.zeros_like(dones)
-        embedding = nn.Dense(128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(obs)
-        embedding = nn.leaky_relu(embedding)
-        embedding = nn.Dense(256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(embedding)
-        embedding = nn.leaky_relu(embedding)
-
-        rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN()(hidden, rnn_in)
-
-        actor_mean = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
-        actor_mean = nn.leaky_relu(actor_mean)
-        actor_mean = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(actor_mean)
-        actor_mean = nn.leaky_relu(actor_mean)
-        actor_mean = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(actor_mean)
-        # pi = distrax.Categorical(logits=actor_mean)
-        if self.config["CONTINUOUS"]:
-            actor_logtstd = self.param('log_std', nn.initializers.zeros, (self.action_dim,))
-            pi = distrax.MultivariateNormalDiag(actor_mean, jnp.exp(actor_logtstd))
-        else:
-            pi = distrax.Categorical(logits=actor_mean)
-
-        critic = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
-        critic = nn.leaky_relu(critic)
-        critic = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(critic)
-        critic = nn.leaky_relu(critic)
-        critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(critic)
-
-        return hidden, pi, jnp.squeeze(critic, axis=-1)
-
-class Transition(NamedTuple):
-    done: jnp.ndarray
-    action: jnp.ndarray
-    value: jnp.ndarray
-    reward: jnp.ndarray
-    log_prob: jnp.ndarray
-    obs: jnp.ndarray
-    info: jnp.ndarray
-
 def make_train(config):
-    config["NUM_UPDATES"] = (
-        config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
-    )
-    config["MINIBATCH_SIZE"] = (
-        config["NUM_ENVS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
-    )
+    config = setup_config(config)
 
     env, env_params = config["ENV"], config["ENV_PARAMS"]
     env = LogWrapper(env)
@@ -100,25 +40,23 @@ def make_train(config):
     eval_env, eval_env_params = config["EVAL_ENV"], config["EVAL_ENV_PARAMS"]
     eval_env = LogWrapper(eval_env)
 
-    config["CONTINUOUS"] = type(env.action_space(env_params)) == spaces.Box 
+    config["CONTINUOUS"] = type(env.action_space(env_params)) == spaces.Box
 
-    def linear_schedule(count):
-        frac = 1.0 - (count // (config["NUM_MINIBATCHES"] * config["UPDATE_EPOCHS"])) / config["NUM_UPDATES"]
-        return config["LR"] * frac
+    linear_schedule = make_linear_schedule(config)
+
+    # Create network with encoder type from config (defaults to 'gru')
+    model_type = config.get("MODEL_TYPE", "gru").lower()
+    network = create_network(model_type, env.action_space(env_params), config)
 
     def train(rng):
         # Initialize max metric tracking
         max_train_metric = float('-inf')
         max_eval_metric = float('-inf')
 
-        # INIT NETWORK
-        if config["CONTINUOUS"]:
-            network = ActorCriticRNN(env.action_space(env_params).shape[0], config=config)
-        else:
-            network = ActorCriticRNN(env.action_space(env_params).n, config=config)
+        # INIT NETWORK PARAMETERS
         rng, _rng = jax.random.split(rng)
         init_x = (jnp.zeros((1, config["NUM_ENVS"], *env.observation_space(env_params).shape)), jnp.zeros((1, config["NUM_ENVS"])))
-        init_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], 256)
+        init_hstate = network.initialize_encoder_hstate(config["NUM_ENVS"])
         network_params = network.init(_rng, init_hstate, init_x)
         if config["ANNEAL_LR"]:
             tx = optax.chain(
@@ -137,13 +75,13 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
-        init_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], 256)
+        init_hstate = network.initialize_encoder_hstate(config["NUM_ENVS"])
 
         # INIT EVAL ENV
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         eval_obsv, eval_env_state = jax.vmap(eval_env.reset, in_axes=(0, None))(reset_rng, eval_env_params)
-        eval_init_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], 256)
+        eval_init_hstate = network.initialize_encoder_hstate(config["NUM_ENVS"])
 
         # Lazy version: create base matrices only (not all words)
         def _create_bases(key):
@@ -221,16 +159,11 @@ def make_train(config):
             ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
             _, _, last_val = network.apply(train_state.params, hstate, ac_in)
             last_val = last_val.squeeze(0)
-            def _calculate_gae(traj_batch, last_val, last_done):
-                def _get_advantages(carry, transition):
-                    gae, next_value, next_done = carry
-                    done, value, reward = transition.done, transition.value, transition.reward 
-                    delta = reward + config["GAMMA"] * next_value * (1 - next_done) - value
-                    gae = delta + config["GAMMA"] * config["GAE_LAMBDA"] * (1 - next_done) * gae
-                    return (gae, value, done), gae
-                _, advantages = jax.lax.scan(_get_advantages, (jnp.zeros_like(last_val), last_val, last_done), traj_batch, reverse=True, unroll=16)
-                return advantages, advantages + traj_batch.value
-            advantages, targets = _calculate_gae(traj_batch, last_val, last_done)
+            # Calculate advantages using common GAE function
+            advantages, targets = calculate_gae(
+                traj_batch, last_val, last_done,
+                config["GAMMA"], config["GAE_LAMBDA"]
+            )
 
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
@@ -266,26 +199,18 @@ def make_train(config):
 
                 train_state, init_hstate, traj_batch, advantages, targets, rng = update_state
 
-                rng, _rng = jax.random.split(rng)
-                permutation = jax.random.permutation(_rng, config["NUM_ENVS"])
+                # Create minibatches using common function
                 batch = (init_hstate, traj_batch, advantages, targets)
-
-                shuffled_batch = jax.tree_util.tree_map(
-                    lambda x: jnp.take(x, permutation, axis=1), batch
-                )
-
-                minibatches = jax.tree_util.tree_map(
-                    lambda x: jnp.swapaxes(jnp.reshape(
-                        x, [x.shape[0], config["NUM_MINIBATCHES"], -1] + list(x.shape[2:])
-                    ), 1, 0),
-                    shuffled_batch,
+                minibatches, rng = create_minibatches(
+                    batch, config["NUM_ENVS"], config["NUM_MINIBATCHES"], rng
                 )
 
                 train_state, total_loss = jax.lax.scan(_update_minbatch, train_state, minibatches)
                 update_state = (train_state, init_hstate, traj_batch, advantages, targets, rng)
                 return update_state, total_loss
 
-            init_hstate = initial_hstate[None,:] # TBH
+            # Add batch dimension to hidden state (handle pytree structure)
+            init_hstate = jax.tree_map(lambda x: x[None, :], initial_hstate)
             update_state = (train_state, init_hstate, traj_batch, advantages, targets, rng)
             update_state, loss_info = jax.lax.scan(_update_epoch, update_state, None, config["UPDATE_EPOCHS"])
             train_state = update_state[0]
@@ -327,12 +252,7 @@ def make_train(config):
             eval_runner_state = (train_state, eval_env_state, eval_obsv, eval_last_done, eval_hstate, _rng)
             eval_runner_state, eval_traj_batch = jax.lax.scan(_eval_env_step, eval_runner_state, None, config["NUM_STEPS"])
 
-            def safe_mean(info):
-                returned_episodes = info["returned_episode"].sum()
-                returns_sum = (info["return_info"][...,1]*info["returned_episode"]).sum()
-                return jnp.where(returned_episodes > 0, returns_sum / returned_episodes, 0.0)
-                
-
+            # Calculate metrics using common safe_mean function
             train_metric = safe_mean(traj_batch.info)
             in_context_metric = safe_mean(eval_traj_batch.info)
 
@@ -375,10 +295,14 @@ def make_train(config):
         runner_state = (train_state, env_state, obsv, last_done, init_hstate, _rng,
                        train_bases)
         runner_state, metrics = jax.lax.scan(_update_step, runner_state, None, config["NUM_UPDATES"])
-        
+
         # Get the final metrics from the last update
         final_metrics = jax.tree_util.tree_map(lambda x: x[-1], metrics)
-        
+
+        # Add max values tracked in callback
+        final_metrics["max_train_metric"] = max_train_metric
+        final_metrics["max_eval_metric"] = max_eval_metric
+
         return runner_state, final_metrics
     
     return train

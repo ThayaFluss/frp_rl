@@ -1,10 +1,11 @@
 import jax
 import jax.numpy as jnp
+import jax.profiler
 import time
 import logging
 from envs.wrappers import AliasPrevActionV2
 
-from utils.checkpoint import create_experiment_directory, save_config_yaml, save_checkpoint
+from utils.checkpoint import create_experiment_directory, save_config_yaml, save_checkpoint, save_run_info
 
 import argparse
 
@@ -18,13 +19,26 @@ logger = logging.getLogger(__name__)
 
 # Dispatcher: imports will be selected based on --mode flag
 
-def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_kwargs={}, norm_kwargs={}, mode="v1"):
+def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_kwargs={}, norm_kwargs={}, mode="v1", wandb_run_id=None):
     """
     Run training with specified implementation mode.
 
     Args:
         mode: "v1" (original) or "lazy" (lazy evaluation)
     """
+    # Configure JAX profiling options
+    jax_enable_compile_log = (args.jax_profile >= 1)
+    jax_enable_profiler = (args.jax_profile >= 2)
+
+    jax.config.update("jax_log_compiles", jax_enable_compile_log)
+
+    if args.jax_profile == 0:
+        logger.info("JAX profiling: DISABLED")
+    elif args.jax_profile == 1:
+        logger.info("JAX profiling: COMPILE_LOG only")
+    else:  # >= 2
+        logger.info("JAX profiling: COMPILE_LOG + PROFILER")
+
     logger.info("="*50)
     logger.info(f"Running in mode: {mode}")
     logger.info("="*50)
@@ -32,12 +46,10 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
     # Dispatcher: import appropriate modules based on mode
     if mode == "lazy":
         from envs.meta_environment_lazy import create_meta_environment
-        from algorithms.ppo_gru_in_context_lazy import make_train as make_train_gru
-        from algorithms.ppo_s5_in_context_lazy import make_train as make_train_s5
+        from algorithms.ppo_in_context_lazy import make_train
     else:  # v1
         from envs.meta_environment import create_meta_environment
-        from algorithms.ppo_gru_in_context import make_train as make_train_gru
-        from algorithms.ppo_s5_in_context import make_train as make_train_s5
+        from algorithms.ppo_in_context import make_train
 
     rng = jax.random.PRNGKey(args.seed)
     rng, _rng = jax.random.split(rng)
@@ -69,6 +81,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
 
     if args.debug==1:
         config = {
+        "MODEL_TYPE": arch,  # 'gru' or 's5'
         "LR": 2.5e-4,
         "NUM_ENVS": 1,
         "NUM_STEPS": 16,  # Reduced from 128
@@ -99,6 +112,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         }
     else:
         config = {
+        "MODEL_TYPE": arch,  # 'gru' or 's5'
         "LR": args.lr,
         "NUM_ENVS": args.num_envs,
         "NUM_STEPS": args.num_steps,
@@ -133,10 +147,22 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
 
     if arch == "s5":
         logger.info("Starting S5 compilation...")
-        train_vjit_s5 = jax.jit(jax.vmap(make_train_s5(config)))
+        train_vjit_s5 = jax.jit(jax.vmap(make_train(config)))
+
+        # Start JAX profiler for compilation analysis (if enabled)
+        if jax_enable_profiler:
+            logger.info("Starting JAX profiler...")
+            jax.profiler.start_trace("/tmp/jax-trace")
+
         t0 = time.time()
         compiled_s5 = train_vjit_s5.lower(rngs).compile()
         compile_s5_time = time.time() - t0
+
+        # Stop JAX profiler after compilation (if enabled)
+        if jax_enable_profiler:
+            jax.profiler.stop_trace()
+            logger.info("JAX profiler trace saved to /tmp/jax-trace")
+
         logger.info(f"S5 compilation completed in {compile_s5_time:.2f}s")
 
         logger.info("Starting S5 training execution...")
@@ -173,13 +199,32 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
 
         if "few_shot_metric" in metrics:
             info_dict["s5"]["few_shot_metrics"] = metrics["few_shot_metric"]
+
+        # Log timing metrics to wandb with unified names
+        wandb.log({
+            "time/compile_time": compile_s5_time,
+            "time/run_time": run_s5_time,
+            "time/total_time": total_s5_time,
+        })
     
     elif arch == "gru":
         logger.info("Starting GRU compilation...")
-        train_vjit_rnn = jax.jit(jax.vmap(make_train_gru(config)))
+        train_vjit_rnn = jax.jit(jax.vmap(make_train(config)))
+
+        # Start JAX profiler for compilation analysis (if enabled)
+        if jax_enable_profiler:
+            logger.info("Starting JAX profiler...")
+            jax.profiler.start_trace("/tmp/jax-trace")
+
         t0 = time.time()
         compiled_rnn = train_vjit_rnn.lower(rngs).compile()
         compile_rnn_time = time.time() - t0
+
+        # Stop JAX profiler after compilation (if enabled)
+        if jax_enable_profiler:
+            jax.profiler.stop_trace()
+            logger.info("JAX profiler trace saved to /tmp/jax-trace")
+
         logger.info(f"GRU compilation completed in {compile_rnn_time:.2f}s")
 
         logger.info("Starting GRU training execution...")
@@ -216,6 +261,13 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
 
         if "few_shot_metric" in metrics:
             info_dict["gru"]["few_shot_metrics"] = metrics["few_shot_metric"]
+
+        # Log timing metrics to wandb with unified names
+        wandb.log({
+            "time/compile_time": compile_rnn_time,
+            "time/run_time": run_rnn_time,
+            "time/total_time": total_rnn_time,
+        })
     
     else:
         raise NotImplementedError
@@ -279,6 +331,22 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             exp_dir=exp_dir
         )
 
+        # Extract metrics for run_info.yaml
+        train_metric_final = float(metrics.get("train_metric", 0.0))
+        eval_metric_final = float(metrics.get("in_context_metric", 0.0))
+        train_metric_max = float(metrics.get("max_train_metric", train_metric_final))
+        eval_metric_max = float(metrics.get("max_eval_metric", eval_metric_final))
+
+        # Save run info (wandb run ID and metrics) to YAML
+        save_run_info(
+            exp_dir=exp_dir,
+            wandb_run_id=wandb_run_id,
+            train_metric_final=train_metric_final,
+            train_metric_max=train_metric_max,
+            eval_metric_final=eval_metric_final,
+            eval_metric_max=eval_metric_max
+        )
+
 
 if __name__ == "__main__":
     import wandb
@@ -293,6 +361,8 @@ if __name__ == "__main__":
                         help="Wandb project name (default: %(default)s)")
     parser.add_argument("--debug", type=int, default=0,
                         help="Debug mode: 0 or 1 (default: %(default)s)")
+    parser.add_argument("--jax_profile", type=int, default=0,
+                        help="JAX profiling level: 0=disabled, 1=compile_log, 2=profiler+compile_log (default: %(default)s)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed (default: %(default)s)")
 
@@ -383,4 +453,5 @@ if __name__ == "__main__":
     }
 
     wandb.init(project=args.log_wandb, config=args)
-    run(args, args.num_runs, args.env, args.arch, env_kwargs=env_kwargs, meta_kwargs=meta_kwargs, norm_kwargs=norm_kwargs, mode=args.mode)
+    wandb_run_id = wandb.run.id if wandb.run else None
+    run(args, args.num_runs, args.env, args.arch, env_kwargs=env_kwargs, meta_kwargs=meta_kwargs, norm_kwargs=norm_kwargs, mode=args.mode, wandb_run_id=wandb_run_id)

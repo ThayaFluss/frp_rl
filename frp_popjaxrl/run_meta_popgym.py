@@ -83,11 +83,11 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         config = {
         "MODEL_TYPE": arch,  # 'gru' or 's5'
         "LR": 2.5e-4,
-        "NUM_ENVS": 1,
+        "NUM_ENVS": 2,
         "NUM_STEPS": 16,  # Reduced from 128
         "TOTAL_TIMESTEPS": 1e3,  # Reduced from 1e4
-        "UPDATE_EPOCHS": 1,
-        "NUM_MINIBATCHES":1,
+        "UPDATE_EPOCHS": 2,
+        "NUM_MINIBATCHES":2,
         "GAMMA": 0.99,
         "GAE_LAMBDA": 1.0,
         "CLIP_EPS": 0.2,

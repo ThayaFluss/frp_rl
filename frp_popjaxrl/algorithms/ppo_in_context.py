@@ -4,6 +4,7 @@ Unified PPO training with in-context learning (eager word creation).
 This module supports both GRU and S5 encoders via the MODEL_TYPE configuration parameter.
 Words are created eagerly at initialization and optionally reset each epoch.
 """
+import logging
 from typing import NamedTuple, Dict
 
 import jax
@@ -26,6 +27,9 @@ from .ppo_common import (
     setup_config,
     create_network,
 )
+
+logger = logging.getLogger(__name__)
+
 
 def make_train(config):
     config = setup_config(config)
@@ -267,8 +271,8 @@ def make_train(config):
                 max_train_metric = max(max_train_metric, float(train_metric))
                 max_eval_metric = max(max_eval_metric, float(in_context_metric))
 
-                print(f"Train metric: {train_metric}, In-context: {in_context_metric}")
-                print(f"Train episode done: {train_done}, Eval episode done: {eval_done}")
+                logger.info(f"Train metric: {train_metric}, In-context: {in_context_metric}")
+                logger.info(f"Train episode done: {train_done}, Eval episode done: {eval_done}")
                 wandb.log({
                         "metric": train_metric,
                         "eval_metric": in_context_metric,

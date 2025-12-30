@@ -196,15 +196,15 @@ def create_network(encoder_type: str, action_space, config):
         >>> network = create_network('s5', env.action_space(env_params), config)
     """
     from algorithms.models import (
-        GRUEncoder, S5Encoder,
+        GRURepModel, S5RepModel,
         ActorCriticContinuous, ActorCriticDiscrete
     )
 
-    # Select encoder based on type
+    # Select RepModel based on type
     if encoder_type.lower() == 'gru':
-        encoder = GRUEncoder(config=config)
+        rep_model = GRURepModel(config=config)
     elif encoder_type.lower() == 's5':
-        encoder = S5Encoder(config=config)
+        rep_model = S5RepModel(config=config)
     else:
         raise ValueError(
             f"Unknown encoder_type: {encoder_type}. "
@@ -217,7 +217,7 @@ def create_network(encoder_type: str, action_space, config):
         action_dim = action_space.shape[0]
         config["CONTINUOUS"] = True
         return ActorCriticContinuous(
-            encoder=encoder,
+            rep_model=rep_model,
             action_dim=action_dim,
             config=config
         )
@@ -226,7 +226,7 @@ def create_network(encoder_type: str, action_space, config):
         action_dim = action_space.n
         config["CONTINUOUS"] = False
         return ActorCriticDiscrete(
-            encoder=encoder,
+            rep_model=rep_model,
             action_dim=action_dim,
             config=config
         )

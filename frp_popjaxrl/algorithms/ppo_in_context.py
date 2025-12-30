@@ -52,7 +52,7 @@ def make_train(config):
         # INIT NETWORK PARAMETERS
         rng, _rng = jax.random.split(rng)
         init_x = (jnp.zeros((1, config["NUM_ENVS"], *env.observation_space(env_params).shape)), jnp.zeros((1, config["NUM_ENVS"])))
-        init_hstate = network.initialize_encoder_hstate(config["NUM_ENVS"])
+        init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
         network_params = network.init(_rng, init_hstate, init_x)
         if config["ANNEAL_LR"]:
             tx = optax.chain(
@@ -71,13 +71,13 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
-        init_hstate = network.initialize_encoder_hstate(config["NUM_ENVS"])
+        init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
 
         # INIT EVAL ENV
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         eval_obsv, eval_env_state = jax.vmap(eval_env.reset, in_axes=(0, None))(reset_rng, eval_env_params)
-        eval_init_hstate = network.initialize_encoder_hstate(config["NUM_ENVS"])
+        eval_init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
 
         # Add function to create words that will be called periodically
         def _create_words(key):

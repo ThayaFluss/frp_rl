@@ -2,9 +2,9 @@
 Model definitions for PPO with different architectures.
 
 This module contains:
-- ScannedRNN: GRU-based recurrent model (used by GRUEncoder)
-- GRUEncoder: GRU-based encoder for sequence processing
-- S5Encoder: S5-based encoder for sequence processing
+- GRUCore: GRU-based core for stateful temporal processing
+- GRURepModel: GRU-based representation model (ObsEncoder + GRUCore)
+- S5RepModel: S5-based representation model (ObsEncoder + S5Core)
 - ActorCriticBase: Base class for actor-critic networks
 - ActorCriticContinuous: Actor-critic for continuous action spaces
 - ActorCriticDiscrete: Actor-critic for discrete action spaces
@@ -22,8 +22,8 @@ from gymnax.environments import spaces
 from .s5 import StackedEncoderModel
 
 
-class ScannedRNN(nn.Module):
-    """GRU-based recurrent neural network with scanning."""
+class GRUCore(nn.Module):
+    """GRU Core for stateful temporal processing."""
 
     @functools.partial(
         nn.scan,
@@ -33,7 +33,7 @@ class ScannedRNN(nn.Module):
         split_rngs={'params': False})
     @nn.compact
     def __call__(self, carry, x):
-        """Applies the module."""
+        """Applies the GRU core to process temporal sequences."""
         rnn_state = carry
         ins, resets = x
         rnn_state = jnp.where(
@@ -47,17 +47,17 @@ class ScannedRNN(nn.Module):
 
     @staticmethod
     def initialize_carry(batch_size, hidden_size):
-        """Initialize the hidden state for GRU."""
+        """Initialize the hidden state for GRU Core."""
         return nn.GRUCell(hidden_size, parent=None).initialize_carry(
             jax.random.PRNGKey(0), (batch_size, hidden_size))
 
 
 # ============================================================================
-# New Refactored Architecture: Encoder Separation
+# New Refactored Architecture: RepModel = ObsEncoder + Core
 # ============================================================================
 
 
-class GRUEncoder(nn.Module):
+class GRURepModel(nn.Module):
     """
     GRU-based encoder for ActorCritic networks.
 
@@ -82,7 +82,7 @@ class GRUEncoder(nn.Module):
         """
         import jax.numpy as jnp
         hidden_size = 256  # GRU hidden size
-        carry = ScannedRNN.initialize_carry(batch_size, hidden_size)
+        carry = GRUCore.initialize_carry(batch_size, hidden_size)
         # Add time dimension to match S5 format: (batch, hidden) -> (1, batch, hidden)
         # Return as single-element list to match S5's multi-layer structure
         return [jnp.expand_dims(carry, axis=0)]
@@ -119,7 +119,7 @@ class GRUEncoder(nn.Module):
 
         # GRU processing
         rnn_in = (embedding, dones)
-        h, embedding = ScannedRNN()(h, rnn_in)
+        h, embedding = GRUCore()(h, rnn_in)
 
         # Add time dimension back and wrap in list
         new_hidden = [jnp.expand_dims(h, axis=0)]  # (batch, hidden) -> [(1, batch, hidden)]
@@ -127,7 +127,7 @@ class GRUEncoder(nn.Module):
         return new_hidden, embedding
 
 
-class S5Encoder(nn.Module):
+class S5RepModel(nn.Module):
     """
     S5-based encoder for ActorCritic networks.
 
@@ -197,10 +197,10 @@ class S5Encoder(nn.Module):
     def setup(self):
         """Setup S5 encoder layers."""
         # Encoder layers
-        self.encoder_0 = nn.Dense(
+        self.rep_model_0 = nn.Dense(
             128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )
-        self.encoder_1 = nn.Dense(
+        self.rep_model_1 = nn.Dense(
             256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )
 
@@ -232,9 +232,9 @@ class S5Encoder(nn.Module):
             dones = jnp.zeros_like(dones)
 
         # Encoder layers
-        embedding = self.encoder_0(obs)
+        embedding = self.rep_model_0(obs)
         embedding = nn.leaky_relu(embedding)
-        embedding = self.encoder_1(embedding)
+        embedding = self.rep_model_1(embedding)
         embedding = nn.leaky_relu(embedding)
 
         # S5 processing
@@ -245,34 +245,45 @@ class S5Encoder(nn.Module):
 
 class ActorCriticBase(nn.Module):
     """
-    Base ActorCritic network with pluggable encoder.
+    Base ActorCritic network with pluggable RepModel.
 
     This class provides the common actor/critic heads and delegates
-    encoding to a separate encoder module (GRU or S5).
+    representation learning to a separate RepModel (GRU or S5).
+    RepModel = ObsEncoder (stateless) + Core (stateful).
     """
 
-    encoder: nn.Module  # GRUEncoder or S5Encoder
+    rep_model: nn.Module  # GRURepModel or S5RepModel
     action_dim: int
     config: Dict
 
-    def initialize_encoder_hstate(self, batch_size):
+    def initialize_core_hidden_state(self, batch_size):
         """
-        Initialize encoder hidden state.
+        Initialize Core hidden state.
 
-        This method delegates to the encoder's initialize_carry method,
-        providing a unified interface regardless of encoder type.
+        This method delegates to the RepModel's initialize_carry method,
+        providing a unified interface regardless of Core type (GRU/S5).
 
         Args:
             batch_size: Number of environments
 
         Returns:
-            Initial encoder hidden state
+            Initial Core hidden state
         """
-        return self.encoder.initialize_carry(batch_size, self.config)
+        return self.rep_model.initialize_carry(batch_size, self.config)
 
-    def encode(self, hidden, obs, dones):
-        """Encode observations using the encoder."""
-        return self.encoder(hidden, obs, dones)
+    def forward_rep_model(self, hidden, obs, dones):
+        """
+        Forward pass through RepModel to obtain representations.
+
+        Args:
+            hidden: Core hidden state
+            obs: Observations
+            dones: Done flags
+
+        Returns:
+            (new_hidden, representation): Updated hidden state and learned representations
+        """
+        return self.rep_model(hidden, obs, dones)
 
     def decode_actor(self, embedding):
         """
@@ -322,7 +333,7 @@ class ActorCriticContinuous(ActorCriticBase):
         obs, dones = x
 
         # Encode (GRU or S5)
-        hidden, embedding = self.encode(hidden, obs, dones)
+        hidden, embedding = self.forward_rep_model(hidden, obs, dones)
 
         # Actor - Continuous (Gaussian)
         actor_mean = self.decode_actor(embedding)
@@ -348,7 +359,7 @@ class ActorCriticDiscrete(ActorCriticBase):
         obs, dones = x
 
         # Encode (GRU or S5)
-        hidden, embedding = self.encode(hidden, obs, dones)
+        hidden, embedding = self.forward_rep_model(hidden, obs, dones)
 
         # Actor - Discrete (Categorical)
         actor_logits = self.decode_actor(embedding)

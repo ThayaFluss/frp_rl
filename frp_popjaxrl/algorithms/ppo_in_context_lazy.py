@@ -171,7 +171,7 @@ def make_train(config):
                     init_hstate, traj_batch,  advantages, targets = batch_info
                     def _loss_fn(params, init_hstate, traj_batch, gae, targets):
                         # RERUN NETWORK
-                        _, pi, value = network.apply(params, init_hstate[0], (traj_batch.obs, traj_batch.done))
+                        _, pi, value = network.apply(params, init_hstate, (traj_batch.obs, traj_batch.done))
                         log_prob = pi.log_prob(traj_batch.action)
 
                         # CALCULATE VALUE LOSS
@@ -209,9 +209,7 @@ def make_train(config):
                 update_state = (train_state, init_hstate, traj_batch, advantages, targets, rng)
                 return update_state, total_loss
 
-            # Add batch dimension to hidden state (handle pytree structure)
-            init_hstate = jax.tree_map(lambda x: x[None, :], initial_hstate)
-            update_state = (train_state, init_hstate, traj_batch, advantages, targets, rng)
+            update_state = (train_state, initial_hstate, traj_batch, advantages, targets, rng)
             update_state, loss_info = jax.lax.scan(_update_epoch, update_state, None, config["UPDATE_EPOCHS"])
             train_state = update_state[0]
             metric = traj_batch.info

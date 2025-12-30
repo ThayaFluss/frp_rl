@@ -70,17 +70,22 @@ class GRUEncoder(nn.Module):
     @staticmethod
     def initialize_carry(batch_size, config):
         """
-        Initialize GRU hidden state.
+        Initialize GRU hidden state with shape compatible with S5.
 
         Args:
             batch_size: Number of environments
             config: Configuration dict (unused for GRU, kept for consistency)
 
         Returns:
-            Initial GRU hidden state
+            Initial GRU hidden state with shape (1, batch_size, hidden_size)
+            Wrapped in a list for compatibility with S5's multi-layer structure
         """
+        import jax.numpy as jnp
         hidden_size = 256  # GRU hidden size
-        return ScannedRNN.initialize_carry(batch_size, hidden_size)
+        carry = ScannedRNN.initialize_carry(batch_size, hidden_size)
+        # Add time dimension to match S5 format: (batch, hidden) -> (1, batch, hidden)
+        # Return as single-element list to match S5's multi-layer structure
+        return [jnp.expand_dims(carry, axis=0)]
 
     @nn.compact
     def __call__(self, hidden, obs, dones):
@@ -88,15 +93,19 @@ class GRUEncoder(nn.Module):
         Encode observations using GRU.
 
         Args:
-            hidden: GRU hidden state
+            hidden: GRU hidden state (list with single element for S5 compatibility)
             obs: Observations [seq_len, batch, obs_dim]
             dones: Done flags [seq_len, batch]
 
         Returns:
-            (new_hidden, embedding): Updated hidden state and embeddings [seq_len, batch, 256]
+            (new_hidden, embedding): Updated hidden state (list format) and embeddings [seq_len, batch, 256]
         """
         if self.config.get("NO_RESET"):
             dones = jnp.zeros_like(dones)
+
+        # Extract hidden state from list and remove time dimension
+        # hidden is [(1, batch, hidden_size)]
+        h = hidden[0].squeeze(0)  # (1, batch, hidden) -> (batch, hidden)
 
         # Encoder layers
         embedding = nn.Dense(
@@ -110,9 +119,12 @@ class GRUEncoder(nn.Module):
 
         # GRU processing
         rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN()(hidden, rnn_in)
+        h, embedding = ScannedRNN()(h, rnn_in)
 
-        return hidden, embedding
+        # Add time dimension back and wrap in list
+        new_hidden = [jnp.expand_dims(h, axis=0)]  # (batch, hidden) -> [(1, batch, hidden)]
+
+        return new_hidden, embedding
 
 
 class S5Encoder(nn.Module):

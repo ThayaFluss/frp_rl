@@ -107,6 +107,11 @@ def save_checkpoint(
     eval_metric: float,
     num_updates: int,
     exp_dir: str,
+    wandb_run_id: Optional[str] = None,
+    train_metric_final: Optional[float] = None,
+    train_metric_max: Optional[float] = None,
+    eval_metric_final: Optional[float] = None,
+    eval_metric_max: Optional[float] = None,
 ) -> str:
     """
     Save a model checkpoint with all necessary metadata.
@@ -122,6 +127,11 @@ def save_checkpoint(
         eval_metric: Evaluation metric value (e.g., in_context_metric)
         num_updates: Number of training updates completed
         exp_dir: Experiment directory path (e.g., "exp/20251226_114959")
+        wandb_run_id: Optional wandb run ID for tracking
+        train_metric_final: Final value of training metric (raw)
+        train_metric_max: Maximum value of training metric
+        eval_metric_final: Final value of evaluation metric (raw)
+        eval_metric_max: Maximum value of evaluation metric
 
     Returns:
         str: Path to saved checkpoint file
@@ -265,3 +275,72 @@ def _prepare_config_for_checkpoint(
         config_to_save["seed"] = seed
 
     return config_to_save
+
+
+def save_run_info(
+    exp_dir: str,
+    wandb_run_id: Optional[str] = None,
+    train_metric_final: Optional[float] = None,
+    train_metric_max: Optional[float] = None,
+    eval_metric_final: Optional[float] = None,
+    eval_metric_max: Optional[float] = None,
+) -> str:
+    """
+    Save run information (wandb run ID and metrics) to a YAML file.
+
+    Args:
+        exp_dir: Experiment directory path
+        wandb_run_id: Optional wandb run ID for tracking
+        train_metric_final: Final value of training metric (last iteration)
+        train_metric_max: Maximum value of training metric
+        eval_metric_final: Final value of evaluation metric (last iteration)
+        eval_metric_max: Maximum value of evaluation metric
+
+    Returns:
+        str: Path to saved run_info.yaml file
+
+    Example:
+        >>> run_info_path = save_run_info(
+        ...     exp_dir="exp/20251226_114959",
+        ...     wandb_run_id="abc123",
+        ...     train_metric_final=0.85,
+        ...     train_metric_max=0.92,
+        ...     eval_metric_final=0.88,
+        ...     eval_metric_max=0.95
+        ... )
+        >>> print(run_info_path)
+        exp/20251226_114959/run_info.yaml
+    """
+    # Prepare run info dictionary
+    run_info = {}
+
+    # Add wandb run ID if provided
+    if wandb_run_id is not None:
+        run_info["wandb_run_id"] = wandb_run_id
+
+    # Add metrics if provided
+    metrics = {}
+    if train_metric_final is not None:
+        metrics["train_metric_final"] = float(train_metric_final)
+    if train_metric_max is not None:
+        metrics["train_metric_max"] = float(train_metric_max)
+    if eval_metric_final is not None:
+        metrics["eval_metric_final"] = float(eval_metric_final)
+    if eval_metric_max is not None:
+        metrics["eval_metric_max"] = float(eval_metric_max)
+
+    if metrics:
+        run_info["metrics"] = metrics
+
+    # Save run_info.yaml
+    run_info_path = os.path.join(exp_dir, "run_info.yaml")
+    with open(run_info_path, "w") as f:
+        yaml.dump(run_info, f, default_flow_style=False)
+
+    print(f"Run info saved to {run_info_path}")
+    if wandb_run_id:
+        print(f"  WandB run ID: {wandb_run_id}")
+    if metrics:
+        print(f"  Metrics: {metrics}")
+
+    return run_info_path

@@ -9,6 +9,9 @@ checkpoints/
 *.pkl
 exp/
 tbm*
+dev/
+logs/
+.claude
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

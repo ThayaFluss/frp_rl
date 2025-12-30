@@ -1,19 +1,56 @@
 import jax
 import jax.numpy as jnp
+import jax.profiler
 import time
-from envs.meta_environment import create_meta_environment
+import logging
 from envs.wrappers import AliasPrevActionV2
-from algorithms.ppo_gru_in_context import make_train as make_train_gru
-from algorithms.ppo_s5_in_context import make_train as make_train_s5
-import pickle
-import os
-from flax.core import unfreeze
-import yaml
+
+from utils.checkpoint import create_experiment_directory, save_config_yaml, save_checkpoint, save_run_info
 
 import argparse
 
-def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_kwargs={}, norm_kwargs={}):
-    print("*"*10)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# Dispatcher: imports will be selected based on --mode flag
+
+def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_kwargs={}, norm_kwargs={}, mode="v1", wandb_run_id=None):
+    """
+    Run training with specified implementation mode.
+
+    Args:
+        mode: "v1" (original) or "lazy" (lazy evaluation)
+    """
+    # Configure JAX profiling options
+    jax_enable_compile_log = (args.jax_profile >= 1)
+    jax_enable_profiler = (args.jax_profile >= 2)
+
+    jax.config.update("jax_log_compiles", jax_enable_compile_log)
+
+    if args.jax_profile == 0:
+        logger.info("JAX profiling: DISABLED")
+    elif args.jax_profile == 1:
+        logger.info("JAX profiling: COMPILE_LOG only")
+    else:  # >= 2
+        logger.info("JAX profiling: COMPILE_LOG + PROFILER")
+
+    logger.info("="*50)
+    logger.info(f"Running in mode: {mode}")
+    logger.info("="*50)
+
+    # Dispatcher: import appropriate modules based on mode
+    if mode == "lazy":
+        from envs.meta_environment_lazy import create_meta_environment
+        from algorithms.ppo_in_context_lazy import make_train
+    else:  # v1
+        from envs.meta_environment import create_meta_environment
+        from algorithms.ppo_in_context import make_train
+
     rng = jax.random.PRNGKey(args.seed)
     rng, _rng = jax.random.split(rng)
     meta_kwargs["meta_rng"] = _rng
@@ -29,11 +66,12 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
     rng, _rng = jax.random.split(rng)
     eval_meta_kwargs["meta_rng"] = _rng
     eval_meta_kwargs["meta_eval"] = True
+    eval_meta_kwargs["num_trials_per_episode"] = args.eval_num_trials
 
     # Set up eval environment augmentation method
-    if args.eval_method == "padding":      
+    if args.eval_method == "padding":
         eval_meta_kwargs["meta_const_aug"] = "padding"
-    elif args.eval_method == "tiling":      
+    elif args.eval_method == "tiling":
         eval_meta_kwargs["meta_const_aug"] = "tiling"
     elif args.eval_method == "identity":
         eval_meta_kwargs["meta_const_aug"] = "identity"
@@ -43,12 +81,13 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
 
     if args.debug==1:
         config = {
+        "MODEL_TYPE": arch,  # 'gru' or 's5'
         "LR": 2.5e-4,
-        "NUM_ENVS": 1,
+        "NUM_ENVS": 2,
         "NUM_STEPS": 16,  # Reduced from 128
         "TOTAL_TIMESTEPS": 1e3,  # Reduced from 1e4
-        "UPDATE_EPOCHS": 1,
-        "NUM_MINIBATCHES":1,
+        "UPDATE_EPOCHS": 2,
+        "NUM_MINIBATCHES":2,
         "GAMMA": 0.99,
         "GAE_LAMBDA": 1.0,
         "CLIP_EPS": 0.2,
@@ -73,6 +112,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         }
     else:
         config = {
+        "MODEL_TYPE": arch,  # 'gru' or 's5'
         "LR": args.lr,
         "NUM_ENVS": args.num_envs,
         "NUM_STEPS": args.num_steps,
@@ -106,52 +146,128 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
     info_dict = {}
 
     if arch == "s5":
-        train_vjit_s5 = jax.jit(jax.vmap(make_train_s5(config)))
+        logger.info("Starting S5 compilation...")
+        train_vjit_s5 = jax.jit(jax.vmap(make_train(config)))
+
+        # Start JAX profiler for compilation analysis (if enabled)
+        if jax_enable_profiler:
+            logger.info("Starting JAX profiler...")
+            jax.profiler.start_trace("/tmp/jax-trace")
+
         t0 = time.time()
         compiled_s5 = train_vjit_s5.lower(rngs).compile()
         compile_s5_time = time.time() - t0
-        print(f"s5 compile time: {compile_s5_time}")
 
+        # Stop JAX profiler after compilation (if enabled)
+        if jax_enable_profiler:
+            jax.profiler.stop_trace()
+            logger.info("JAX profiler trace saved to /tmp/jax-trace")
+
+        logger.info(f"S5 compilation completed in {compile_s5_time:.2f}s")
+
+        logger.info("Starting S5 training execution...")
         t0 = time.time()
         out_s5 = jax.block_until_ready(compiled_s5(rngs))
         run_s5_time = time.time() - t0
-        print(f"s5 time: {run_s5_time}")
-        metrics = jax.tree_util.tree_map(lambda x: x.item() if hasattr(x, 'item') else x, out_s5[1])
-        
+        logger.info(f"S5 training completed in {run_s5_time:.2f}s")
+
+        # Calculate total time
+        total_s5_time = compile_s5_time + run_s5_time
+
+        # Display summary
+        logger.info("="*50)
+        logger.info("S5 Training Summary:")
+        logger.info(f"  Compile time:  {compile_s5_time:>8.2f}s")
+        logger.info(f"  Training time: {run_s5_time:>8.2f}s")
+        logger.info(f"  Total time:    {total_s5_time:>8.2f}s")
+        logger.info("="*50)
+
+        # Keep arrays as arrays, only convert scalars
+        metrics = jax.tree_util.tree_map(
+            lambda x: x.item() if (hasattr(x, 'item') and (not hasattr(x, 'shape') or x.shape == ())) else x,
+            out_s5[1]
+        )
+
         # Create base info dictionary with common metrics
         info_dict["s5"] = {
             "compile_s5_time": compile_s5_time,
             "run_s5_time": run_s5_time,
+            "total_s5_time": total_s5_time,
             "train_metrics": metrics["train_metric"],
             "in_context_metrics": metrics["in_context_metric"],
         }
 
         if "few_shot_metric" in metrics:
             info_dict["s5"]["few_shot_metrics"] = metrics["few_shot_metric"]
+
+        # Log timing metrics to wandb with unified names
+        wandb.log({
+            "time/compile_time": compile_s5_time,
+            "time/run_time": run_s5_time,
+            "time/total_time": total_s5_time,
+        })
     
     elif arch == "gru":
-        train_vjit_rnn = jax.jit(jax.vmap(make_train_gru(config)))
+        logger.info("Starting GRU compilation...")
+        train_vjit_rnn = jax.jit(jax.vmap(make_train(config)))
+
+        # Start JAX profiler for compilation analysis (if enabled)
+        if jax_enable_profiler:
+            logger.info("Starting JAX profiler...")
+            jax.profiler.start_trace("/tmp/jax-trace")
+
         t0 = time.time()
         compiled_rnn = train_vjit_rnn.lower(rngs).compile()
         compile_rnn_time = time.time() - t0
-        print(f"gru compile time: {compile_rnn_time}")
 
+        # Stop JAX profiler after compilation (if enabled)
+        if jax_enable_profiler:
+            jax.profiler.stop_trace()
+            logger.info("JAX profiler trace saved to /tmp/jax-trace")
+
+        logger.info(f"GRU compilation completed in {compile_rnn_time:.2f}s")
+
+        logger.info("Starting GRU training execution...")
         t0 = time.time()
         out_rnn = jax.block_until_ready(compiled_rnn(rngs))
         run_rnn_time = time.time() - t0
-        print(f"gru time: {run_rnn_time}")
-        metrics = jax.tree_util.tree_map(lambda x: x.item() if hasattr(x, 'item') else x, out_rnn[1])
-        
+        logger.info(f"GRU training completed in {run_rnn_time:.2f}s")
+
+        # Calculate total time
+        total_rnn_time = compile_rnn_time + run_rnn_time
+
+        # Display summary
+        logger.info("="*50)
+        logger.info("GRU Training Summary:")
+        logger.info(f"  Compile time:  {compile_rnn_time:>8.2f}s")
+        logger.info(f"  Training time: {run_rnn_time:>8.2f}s")
+        logger.info(f"  Total time:    {total_rnn_time:>8.2f}s")
+        logger.info("="*50)
+
+        # Keep arrays as arrays, only convert scalars
+        metrics = jax.tree_util.tree_map(
+            lambda x: x.item() if (hasattr(x, 'item') and (not hasattr(x, 'shape') or x.shape == ())) else x,
+            out_rnn[1]
+        )
+
         # Create base info dictionary with common metrics
         info_dict["gru"] = {
             "compile_rnn_time": compile_rnn_time,
             "run_rnn_time": run_rnn_time,
+            "total_rnn_time": total_rnn_time,
             "train_metrics": metrics["train_metric"],
             "in_context_metrics": metrics["in_context_metric"],
         }
 
         if "few_shot_metric" in metrics:
             info_dict["gru"]["few_shot_metrics"] = metrics["few_shot_metric"]
+
+        # Log timing metrics to wandb with unified names
+        wandb.log({
+            "time/compile_time": compile_rnn_time,
+            "time/run_time": run_rnn_time,
+            "time/total_time": total_rnn_time,
+        })
     
     else:
         raise NotImplementedError
@@ -162,9 +278,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
     # Save model checkpoint if requested
     if args.save_model == 1:
         # Create experiment directory with timestamp
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        exp_dir = os.path.join("exp", timestamp)
-        os.makedirs(exp_dir, exist_ok=True)
+        exp_dir = create_experiment_directory("exp")
 
         # Extract params from the output
         if arch == "s5":
@@ -175,86 +289,63 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         # Get the first run's state (in case of multiple runs)
         train_state = jax.tree_util.tree_map(lambda x: x[0] if len(x.shape) > 0 else x, runner_state[0])
 
-        # Convert params to a serializable format
-        params_dict = unfreeze(train_state.params)
-
-        # Create a copy of config without environment objects (which can't be pickled/serialized)
-        config_to_save = {k: v for k, v in config.items() if k not in ["ENV", "ENV_PARAMS", "EVAL_ENV", "EVAL_ENV_PARAMS"]}
-
-        # Add additional metadata to config
-        config_to_save.update({
-            "arch": arch,
-            "env_name": env_name,
-            "env_kwargs": env_kwargs,
-            "meta_kwargs": {k: v for k, v in meta_kwargs.items() if k != "meta_rng"},  # Remove PRNG key
-            "norm_kwargs": norm_kwargs,
-            "seed": args.seed,
-        })
+        # Filter meta_kwargs (remove meta_rng)
+        filtered_meta_kwargs = {k: v for k, v in meta_kwargs.items() if k != "meta_rng"}
 
         # Save config.yaml
-        config_yaml_path = os.path.join(exp_dir, "config.yaml")
-        with open(config_yaml_path, "w") as f:
-            yaml.dump(config_to_save, f, default_flow_style=False)
-        print(f"Config saved to {config_yaml_path}")
+        save_config_yaml(
+            config=config,
+            arch=arch,
+            env_name=env_name,
+            env_kwargs=env_kwargs,
+            meta_kwargs=filtered_meta_kwargs,
+            norm_kwargs=norm_kwargs,
+            seed=args.seed,
+            exp_dir=exp_dir
+        )
 
         # Calculate number of updates
         num_updates = int(config["TOTAL_TIMESTEPS"] // (config["NUM_STEPS"] * config["NUM_ENVS"]))
 
         # Get the final eval metric (in_context_metric)
-        current_eval_metric = float(metrics["in_context_metric"][-1])
+        # Handle both array and scalar cases (fallback for safety)
+        in_context_metric = metrics["in_context_metric"]
+        try:
+            # Try to get the last element if it's an array
+            current_eval_metric = float(in_context_metric[-1])
+        except (TypeError, IndexError):
+            # If it's already a scalar, use it directly
+            current_eval_metric = float(in_context_metric)
 
-        # Prepare checkpoint
-        checkpoint = {
-            "params": params_dict,
-            "eval_metric": current_eval_metric,
-            "num_updates": num_updates,
-            "timestamp": timestamp,
-        }
+        # Save checkpoint
+        save_checkpoint(
+            params=train_state.params,
+            config=config,
+            arch=arch,
+            env_name=env_name,
+            env_kwargs=env_kwargs,
+            meta_kwargs=filtered_meta_kwargs,
+            norm_kwargs=norm_kwargs,
+            eval_metric=current_eval_metric,
+            num_updates=num_updates,
+            exp_dir=exp_dir
+        )
 
-        # Save model with iteration number
-        model_iter_name = os.path.join(exp_dir, f"model_{num_updates}_iter.pkl")
-        with open(model_iter_name, "wb") as f:
-            pickle.dump(checkpoint, f)
-        print(f"Model saved to {model_iter_name}")
-        print(f"Eval metric (in_context): {current_eval_metric}")
+        # Extract metrics for run_info.yaml
+        train_metric_final = float(metrics.get("train_metric", 0.0))
+        eval_metric_final = float(metrics.get("in_context_metric", 0.0))
+        train_metric_max = float(metrics.get("max_train_metric", train_metric_final))
+        eval_metric_max = float(metrics.get("max_eval_metric", eval_metric_final))
 
-        # Save as model_best.pkl if this is the best model so far
-        best_model_path = os.path.join("exp", "model_best.pkl")
-        best_meta_path = os.path.join("exp", "best_model_info.yaml")
-        save_as_best = False
-
-        if os.path.exists(best_model_path):
-            # Load existing best model metadata
-            with open(best_meta_path, "r") as f:
-                best_info = yaml.safe_load(f)
-            best_eval_metric = best_info.get("eval_metric", float('-inf'))
-
-            if current_eval_metric > best_eval_metric:
-                save_as_best = True
-                print(f"New best model! Previous best: {best_eval_metric}, Current: {current_eval_metric}")
-        else:
-            # No existing best checkpoint, save this one
-            save_as_best = True
-            print(f"Saving first model_best with eval metric: {current_eval_metric}")
-
-        if save_as_best:
-            with open(best_model_path, "wb") as f:
-                pickle.dump(checkpoint, f)
-
-            # Save metadata about best model
-            best_info = {
-                "eval_metric": current_eval_metric,
-                "timestamp": timestamp,
-                "num_updates": num_updates,
-                "exp_dir": exp_dir,
-                "arch": arch,
-                "env_name": env_name,
-                "seed": args.seed,
-            }
-            with open(best_meta_path, "w") as f:
-                yaml.dump(best_info, f, default_flow_style=False)
-
-            print(f"Best model saved to {best_model_path}")
+        # Save run info (wandb run ID and metrics) to YAML
+        save_run_info(
+            exp_dir=exp_dir,
+            wandb_run_id=wandb_run_id,
+            train_metric_final=train_metric_final,
+            train_metric_max=train_metric_max,
+            eval_metric_final=eval_metric_final,
+            eval_metric_max=eval_metric_max
+        )
 
 
 if __name__ == "__main__":
@@ -270,6 +361,8 @@ if __name__ == "__main__":
                         help="Wandb project name (default: %(default)s)")
     parser.add_argument("--debug", type=int, default=0,
                         help="Debug mode: 0 or 1 (default: %(default)s)")
+    parser.add_argument("--jax_profile", type=int, default=0,
+                        help="JAX profiling level: 0=disabled, 1=compile_log, 2=profiler+compile_log (default: %(default)s)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed (default: %(default)s)")
 
@@ -290,6 +383,8 @@ if __name__ == "__main__":
                         help="Evaluation method: tiling / padding / identity (default: %(default)s)")
     parser.add_argument("--num_trials", type=int, default=16,
                         help="Number of trials per episode (default: %(default)s)")
+    parser.add_argument("--eval_num_trials", type=int, default=16,
+                        help="Number of trials per episode for evaluation (default: %(default)s)")
 
     ### For gymnax enviroments. Unnecessary  for popgym.
     parser.add_argument("--norm_strategy", type=str, default="fixed",
@@ -333,6 +428,10 @@ if __name__ == "__main__":
     parser.add_argument("--s5_do_gtrxl_norm", type=int, default=0,
                         help="S5 GTrXL normalization: 0 or 1 (default: %(default)s)")
 
+    ### Dispatcher: select implementation version
+    parser.add_argument("--mode", type=str, default="v1",
+                        help="Implementation mode: v1 (original) or lazy (lazy evaluation) (default: %(default)s)")
+
     args = parser.parse_args()
     
     # Meta environment specific kwargs
@@ -354,4 +453,5 @@ if __name__ == "__main__":
     }
 
     wandb.init(project=args.log_wandb, config=args)
-    run(args, args.num_runs, args.env, args.arch, env_kwargs=env_kwargs, meta_kwargs=meta_kwargs, norm_kwargs=norm_kwargs)
+    wandb_run_id = wandb.run.id if wandb.run else None
+    run(args, args.num_runs, args.env, args.arch, env_kwargs=env_kwargs, meta_kwargs=meta_kwargs, norm_kwargs=norm_kwargs, mode=args.mode, wandb_run_id=wandb_run_id)

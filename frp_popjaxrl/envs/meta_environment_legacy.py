@@ -4,10 +4,13 @@ from gymnax.environments import environment, spaces
 from flax import struct
 import chex
 from typing import Tuple, Optional, Any, Dict, List
+from frp.orthogonal_legacy import create_orthogonal_matrices, create_words, random_choice, detect_identity_matrices, get_weight_matrix
 from flax.core import freeze
 
 @struct.dataclass
 class MetaEnvState:
+    env_index: int
+    obs_words: chex.Array
     trial_num: int
     total_steps: int
     env_state: Any
@@ -51,8 +54,17 @@ class MetaEnvironment(environment.Environment):
         self.rng = meta_kwargs.get('meta_rng', jax.random.PRNGKey(42))
         self.meta_const_aug = meta_kwargs.get('meta_const_aug', False)
 
+        # Set up evaluation method if specified
+        if self.meta_const_aug == "padding":
+            self.eval_weight = jnp.eye(self.meta_dim)[:self.input_dim,:]       
+        elif self.meta_const_aug == "tiling":
+            from .environments.metaaug.padding import create_periodic_weight
+            self.eval_weight = create_periodic_weight(input_dim=self.input_dim, output_dim=self.meta_dim, period=round(self.meta_dim/2))
+        else:
+            ...
+            #do not prepare the self.eval weight for reducing memory.
+
         ### obs_shape is output dimension of this class
-        # aug_output_dim is used by FRPManager for transformation output size
         if self.meta_const_aug == "identity":
             self.aug_output_dim = self.input_dim
         elif self.meta_truncate_aug ==1:
@@ -60,9 +72,35 @@ class MetaEnvironment(environment.Environment):
         else:
             self.aug_output_dim = self.meta_dim
 
-        # MetaEnvironment returns raw observations (input_dim + 3 metadata)
-        # FRP transformation happens externally in PPO
-        self.obs_shape = (self.input_dim + 3,)
+        self.obs_shape = (self.aug_output_dim + 3,)
+
+        # Initialize meta-augmentation
+        self._initialize_meta_augmentation()
+
+    def _initialize_meta_augmentation(self):
+        matrices = create_orthogonal_matrices(
+            self.rng, 
+            self.meta_depth, 
+            size=self.meta_dim, 
+            max_depth=self.meta_max_depth, 
+            with_adjoint=self.meta_with_adjoint
+        )
+        self.words = create_words(
+            matrices, 
+            self.meta_depth, 
+            out_size=self.meta_dim, 
+            max_depth=self.meta_max_depth
+        )
+        # Exclude identity matrices before cutoff
+        self.exclude = detect_identity_matrices(self.words)
+        if self.meta_truncate_aug==1:
+            ### Truncate output of augmentation
+            self.words = self.words[:, :self.input_dim, :self.aug_output_dim]
+        else:
+            self.words = self.words[:, :self.input_dim, ]
+        
+        self.total_words = self.words.shape[0]
+        #self.obs_aug = MetaAugNetwork(out_size=self.meta_dim, words=self.words)
 
     @property
     def default_params(self) -> MetaEnvParams:
@@ -84,15 +122,27 @@ class MetaEnvironment(environment.Environment):
         )
         env_obs = jax.lax.select(env_done, env_obs_re, env_obs_st)
 
-        # No FRP transformation here - will be done externally by FRPManager
-        # env_obs is returned as-is
+        if self.meta_const_aug == "identity":
+            # For identity, we directly use the observation vector without transformation
+            env_obs = env_obs
+        elif self.meta_const_aug in ["padding", "tiling"]:
+            env_obs = (env_obs[None,:] @ self.eval_weight)[0]
+        else:
+            # Default behaviour. Choose a word from obs_words.
+            #old_weight = jnp.sqrt(2)*jax.lax.dynamic_slice(state.obs_words, (state.env_index, 0, 0), (1, self.input_dim, self.aug_output_dim))[0]
+            weight = get_weight_matrix(state.obs_words, state.env_index, self.input_dim, self.aug_output_dim)
+            
+            # Use the weight from our new function regardless of the match result
+            env_obs = (env_obs[None,:] @ weight)[0]
 
-        # trial num increases when env has done
+        # trail num increases when env has done 
         trial_num = state.trial_num + env_done
         total_steps = state.total_steps + 1
         done = trial_num >= params.num_trials_per_episode
 
         state = MetaEnvState(
+            env_index=state.env_index,
+            obs_words=state.obs_words,
             trial_num=trial_num,
             total_steps=total_steps,
             env_state=env_state,
@@ -102,9 +152,6 @@ class MetaEnvironment(environment.Environment):
 
         # Handle both discrete and continuous actions
         action_value = action[0] if isinstance(action, jnp.ndarray) and len(action.shape) > 0 else action
-
-        # Return raw observation without padding
-        # FRP transformation will be applied externally by PPO
         obs = jnp.concatenate([env_obs, jnp.array([jnp.float32(action_value), jnp.float32(env_done), 0.0])])
 
         return obs, state, reward, done, info
@@ -112,20 +159,37 @@ class MetaEnvironment(environment.Environment):
     def reset_env(
         self, key: chex.PRNGKey, params: MetaEnvParams
     ) -> Tuple[chex.Array, MetaEnvState]:
-        env_key = key
+        env_key, obs_key, index_key = jax.random.split(key, 3)
         env_obs, env_state = self.env.reset_env(env_key, params.env_params)
 
+        if len(self.exclude) == 0:
+            env_index = jax.random.randint(index_key, (), 0, self.total_words).astype(jnp.int32)
+        else:
+            env_index = random_choice(index_key, 
+                                  total_words=self.total_words, 
+                                  exclude=self.exclude).astype(jnp.int32)
+
+        if self.meta_const_aug == "identity":
+            # For identity, we directly use the observation vector without transformation
+            augmented_obs = env_obs
+        elif self.meta_const_aug in ["padding", "tiling"]:
+            augmented_obs = (env_obs[None,:] @ self.eval_weight)[0]
+        else:
+            weight = get_weight_matrix(self.words, env_index, self.input_dim, self.aug_output_dim)
+            
+            # Use the weight from our new function regardless of the match result
+            augmented_obs = (env_obs[None,:] @ weight)[0]
+
         state = MetaEnvState(
+            env_index=env_index,
+            obs_words=self.words,
             trial_num=0,
             total_steps=0,
             env_state=env_state,
             init_state=env_state,
             init_obs=env_obs,
         )
-
-        # Return raw observation without padding
-        # FRP transformation will be applied externally by PPO
-        obs = jnp.concatenate([env_obs, jnp.array([0.0, 0.0, 1.0])])
+        obs = jnp.concatenate([augmented_obs, jnp.array([0.0, 0.0, 1.0])])
 
         return obs, state
 

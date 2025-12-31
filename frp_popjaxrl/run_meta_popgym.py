@@ -47,9 +47,16 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
     if mode == "lazy":
         from envs.meta_environment_lazy import create_meta_environment
         from algorithms.ppo_in_context_lazy import make_train
-    else:  # v1
+    elif mode == "legacy":
+        # Legacy implementation (before FRP state separation)
+        from envs.meta_environment_legacy import create_meta_environment
+        from algorithms.ppo_in_context_legacy import make_train
+    elif mode == "separated":
+        # New implementation with FRP state separation (default)
         from envs.meta_environment import create_meta_environment
         from algorithms.ppo_in_context import make_train
+    else:
+        raise ValueError(f"Unknown mode: {mode}. Valid modes are: 'separated', 'legacy', 'lazy'")
 
     rng = jax.random.PRNGKey(args.seed)
     rng, _rng = jax.random.split(rng)
@@ -429,8 +436,8 @@ if __name__ == "__main__":
                         help="S5 GTrXL normalization: 0 or 1 (default: %(default)s)")
 
     ### Dispatcher: select implementation version
-    parser.add_argument("--mode", type=str, default="v1",
-                        help="Implementation mode: v1 (original) or lazy (lazy evaluation) (default: %(default)s)")
+    parser.add_argument("--mode", type=str, default="legacy",
+                        help="Implementation mode: separated (FRP state separation), legacy (before separation), or lazy (lazy evaluation) (default: %(default)s)")
 
     args = parser.parse_args()
     

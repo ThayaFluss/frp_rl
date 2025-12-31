@@ -16,14 +16,7 @@ from flax.training.train_state import TrainState
 from gymnax.environments import spaces
 
 from envs.wrappers import LogWrapper
-from frp.frp_manager import (
-    FRPManager,
-    EvalFRPManager,
-    FRPWords,
-    FRPState,
-    create_frp_manager,
-    create_eval_frp_manager,
-)
+from frp.orthogonal_legacy import create_words, create_orthogonal_matrices
 
 from .ppo_common import (
     Transition,
@@ -60,22 +53,9 @@ def make_train(config):
         max_train_metric = float('-inf')
         max_eval_metric = float('-inf')
 
-        # Initialize FRP managers to get correct observation dimensions
-        frp_manager_temp = create_frp_manager(config)
-
-        # Calculate FRP-transformed observation size
-        # Original obs from env: input_dim + 3 (MetaEnv metadata)
-        # After FRP transform: aug_output_dim + 3 (MetaEnv metadata)
-        # After AliasPrevActionV2 wrapper: + (n+1) where n=num_actions for Discrete
-        base_env_obs_size = env.observation_space(env_params).shape[0]
-        # base_env_obs_size = input_dim + 3 + (n+1)
-        # We need to replace input_dim with aug_output_dim
-        metadata_and_wrapper_size = base_env_obs_size - frp_manager_temp.input_dim
-        frp_transformed_obs_size = frp_manager_temp.aug_output_dim + metadata_and_wrapper_size
-
         # INIT NETWORK PARAMETERS
         rng, _rng = jax.random.split(rng)
-        init_x = (jnp.zeros((1, config["NUM_ENVS"], frp_transformed_obs_size)), jnp.zeros((1, config["NUM_ENVS"])))
+        init_x = (jnp.zeros((1, config["NUM_ENVS"], *env.observation_space(env_params).shape)), jnp.zeros((1, config["NUM_ENVS"])))
         init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
         network_params = network.init(_rng, init_hstate, init_x)
         if config["ANNEAL_LR"]:
@@ -103,65 +83,58 @@ def make_train(config):
         eval_obsv, eval_env_state = jax.vmap(eval_env.reset, in_axes=(0, None))(reset_rng, eval_env_params)
         eval_init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
 
-        # Initialize FRP managers
-        frp_manager = create_frp_manager(config)
-        eval_frp_manager = create_eval_frp_manager(config)
+        # Add function to create words that will be called periodically
+        def _create_words(key):
+            matrices = create_orthogonal_matrices(
+                key,
+                config["ENV"].meta_depth,
+                size=config["ENV"].meta_dim,
+                max_depth=config["ENV"].meta_max_depth,
+                with_adjoint=config["ENV"].meta_with_adjoint
+            )
+            words = create_words(
+                matrices,
+                config["ENV"].meta_depth,
+                out_size=config["ENV"].meta_dim,
+                max_depth=config["ENV"].meta_max_depth
+            )
+            input_dim = config["ENV"].obs_shape[0]
+            # For identity eval method, we need to ensure the output of words match the observation dimension
+            if hasattr(config["EVAL_ENV"], "meta_const_aug") and config["EVAL_ENV"].meta_const_aug == "identity":
+                # For identity, we need to ensure the output dimension matches the input dimension
+                # We'll slice the words to match the input dimension for both input and output
+                return words[:, :input_dim, :input_dim]
+            else:
+                # For other evaluation methods, keep the original behavior
+                # (truncate input dimension but keep output dimension as meta_dim)
+                return words[:, :input_dim, :]
 
-        # Create initial FRP words
+        # Create initial words for both training and eval
         rng, _rng = jax.random.split(rng)
-        frp_words = frp_manager.initialize_words(_rng)
+        train_words = _create_words(_rng)
 
-        # Apply FRP transformation to training environment
-        # Sample env_index for each environment and inject into env_state
-        rng, _rng = jax.random.split(rng)
-        sample_rngs = jax.random.split(_rng, config["NUM_ENVS"])
-
-        def initialize_frp_single_env(obs, sample_rng):
-            # Sample env_index
-            env_index = frp_manager.sample_env_index(frp_words, sample_rng)
-
-            # Observation structure (from MetaEnvironment + wrappers):
-            # [raw_obs (input_dim)] + [MetaEnv metadata (3)] + [AliasPrevActionV2 (n+1)]
-            #
-            # After FRP transformation:
-            # [transformed_obs (aug_output_dim)] + [MetaEnv metadata (3)] + [AliasPrevActionV2 (n+1)]
-            #
-            # We need to:
-            # 1. Extract raw_obs[:input_dim]
-            # 2. Apply FRP transform → transformed_obs (aug_output_dim)
-            # 3. Keep rest of observation unchanged (metadata + wrapper data)
-            input_dim = frp_manager.input_dim
-
-            raw_obs = obs[:input_dim]  # Original observation from environment
-            rest = obs[input_dim:]  # Everything after raw obs (metadata + wrapper data)
-
-            # Apply FRP transformation
-            transformed_obs = frp_manager.transform_obs(raw_obs, env_index, frp_words)
-
-            # Reconstruct: [transformed_obs (aug_output_dim)] + [rest]
-            new_obs = jnp.concatenate([transformed_obs, rest])
-
-            return env_index, new_obs
-
-        env_indices, obsv = jax.vmap(initialize_frp_single_env)(obsv, sample_rngs)
-
-        # Create FRP state
-        frp_state = FRPState(env_indices=env_indices, frp_words=frp_words)
+        # Set the words in environments
+        env.words = train_words
 
         # TRAIN LOOP
         def _update_step(runner_state, unused):
-            # Unpack state including frp_state
-            train_state, env_state, obsv, last_done, hstate, rng, frp_state = runner_state
+            # Unpack state including words
+            train_state, env_state, obsv, last_done, hstate, rng, words = runner_state
 
-            # Update frp_words if RESET_WORDS is enabled (static config check)
-            if config.get("RESET_WORDS", False):
-                rng, _rng = jax.random.split(rng)
-                new_frp_words = frp_manager.initialize_words(_rng)
-                frp_state = frp_state.replace(frp_words=new_frp_words)
+            if config.get("RESET_WORDS"):
+                if config["RESET_WORDS"]:
+                    # Update words after each epoch
+                    rng, _rng = jax.random.split(rng)
+                    words = _create_words(_rng)
+                    
+                    # Update environment words
+                    env.words = words
+                    env_state.env_state.replace(
+                        obs_words=words)
 
             # COLLECT TRAJECTORIES
             def _env_step(runner_state, unused):
-                train_state, env_state, last_obs, last_done, hstate, rng, env_indices = runner_state
+                train_state, env_state, last_obs, last_done, hstate, rng = runner_state
                 rng, _rng = jax.random.split(rng)
 
                 # SELECT ACTION
@@ -177,44 +150,17 @@ def make_train(config):
                 obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0,None))(
                     rng_step, env_state, action, env_params
                 )
-
-                # Resample env_indices for environments that are done (meta episode ended)
-                rng, _rng = jax.random.split(rng)
-                resample_rngs = jax.random.split(_rng, config["NUM_ENVS"])
-
-                def maybe_resample_env_index(env_idx, is_done, resample_rng):
-                    """Resample env_index if episode is done, otherwise keep current index."""
-                    new_idx = frp_manager.sample_env_index(frp_state.frp_words, resample_rng)
-                    return jax.lax.select(is_done, new_idx, env_idx)
-
-                env_indices = jax.vmap(maybe_resample_env_index)(env_indices, done, resample_rngs)
-
-                # Apply FRP transformation to observations
-                def apply_frp_transform(obs, env_idx):
-                    input_dim = frp_manager.input_dim
-
-                    raw_obs = obs[:input_dim]  # Original observation from environment
-                    rest = obs[input_dim:]  # Everything after raw obs (metadata + wrapper data)
-
-                    # Apply FRP transformation using env_index
-                    transformed_obs = frp_manager.transform_obs(raw_obs, env_idx, frp_state.frp_words)
-
-                    # Reconstruct full observation
-                    return jnp.concatenate([transformed_obs, rest])
-
-                obsv = jax.vmap(apply_frp_transform)(obsv, env_indices)
-
                 transition = Transition(last_done, action, value, reward, log_prob, last_obs, info)
-                runner_state = (train_state, env_state, obsv, done, hstate, rng, env_indices)
+                runner_state = (train_state, env_state, obsv, done, hstate, rng)
                 return runner_state, transition
 
-            # Minimal runner state for inner loop (include env_indices)
-            runner_state_inner = (train_state, env_state, obsv, last_done, hstate, rng, frp_state.env_indices)
-            initial_hstate = runner_state_inner[4]  # hstate is at index 4
+            # Minimal runner state for inner loop
+            runner_state_inner = (train_state, env_state, obsv, last_done, hstate, rng)
+            initial_hstate = runner_state_inner[-2]  # hstate is at index 4
             runner_state_inner, traj_batch = jax.lax.scan(_env_step, runner_state_inner, None, config["NUM_STEPS"])
 
             # CALCULATE ADVANTAGE
-            train_state, env_state, last_obs, last_done, hstate, rng, final_env_indices = runner_state_inner
+            train_state, env_state, last_obs, last_done, hstate, rng = runner_state_inner
             ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
             _, _, last_val = network.apply(train_state.params, hstate, ac_in)
             last_val = last_val.squeeze(0)
@@ -293,54 +239,16 @@ def make_train(config):
                 obsv, env_state, reward, done, info = jax.vmap(eval_env.step, in_axes=(0,0,0,None))(
                     rng_step, env_state, action, eval_env_params
                 )
-
-                # Apply evaluation FRP transformation
-                def apply_eval_frp_transform(obs):
-                    input_dim = frp_manager.input_dim
-
-                    raw_obs = obs[:input_dim]  # Original observation from environment
-                    rest = obs[input_dim:]  # Everything after raw obs (metadata + wrapper data)
-
-                    # Apply evaluation FRP transformation
-                    if eval_frp_manager is not None:
-                        transformed_obs = eval_frp_manager.transform_obs(raw_obs)
-                    else:
-                        # If no eval manager, use raw observation as-is
-                        transformed_obs = raw_obs
-
-                    # Reconstruct full observation
-                    return jnp.concatenate([transformed_obs, rest])
-
-                obsv = jax.vmap(apply_eval_frp_transform)(obsv)
-
                 transition = Transition(last_done, action, value, reward, log_prob, last_obs, info)
                 runner_state = (train_state, env_state, obsv, done, hstate, rng)
                 return runner_state, transition
 
-            # In-Context evaluation
+            # In-Context evaluation 
             rng, _rng = jax.random.split(rng)
-            # Reset eval env before collecting trajectory
+            # Reset eval env before collecting trajectly
             reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
             eval_partial_reset = lambda x: env.reset(x, eval_env_params)
             eval_obsv, eval_env_state = jax.vmap(eval_partial_reset)(reset_rng)
-
-            # Apply evaluation FRP transformation to initial observations
-            def apply_eval_frp_transform_init(obs):
-                input_dim = frp_manager.input_dim
-
-                raw_obs = obs[:input_dim]  # Original observation from environment
-                rest = obs[input_dim:]  # Everything after raw obs (metadata + wrapper data)
-
-                if eval_frp_manager is not None:
-                    transformed_obs = eval_frp_manager.transform_obs(raw_obs)
-                else:
-                    # If no eval manager, use raw observation as-is
-                    transformed_obs = raw_obs
-
-                return jnp.concatenate([transformed_obs, rest])
-
-            eval_obsv = jax.vmap(apply_eval_frp_transform_init)(eval_obsv)
-
             eval_last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
             eval_hstate=initial_hstate
             
@@ -383,16 +291,13 @@ def make_train(config):
                 "eval_episode_done_count": eval_episode_done_count,
             }
 
-            # Update frp_state with final env_indices from trajectory collection
-            frp_state = frp_state.replace(env_indices=final_env_indices)
-
-            return (train_state, env_state, last_obs, last_done, hstate, rng, frp_state), metrics_dict
+            return (train_state, env_state, last_obs, last_done, hstate, rng, words), metrics_dict
 
         rng, _rng = jax.random.split(rng)
         last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
-
-        runner_state = (train_state, env_state, obsv, last_done, init_hstate, _rng,
-                       frp_state)
+                              
+        runner_state = (train_state, env_state, obsv, last_done, init_hstate, _rng, 
+                       train_words)
         runner_state, metrics = jax.lax.scan(_update_step, runner_state, None, config["NUM_UPDATES"])
 
         # Get the final metrics from the last update

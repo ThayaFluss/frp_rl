@@ -48,26 +48,11 @@ def create_words(matrices, depth, in_size=2, out_size=64, max_depth=8):
 
 
 def detect_identity_matrices(array):
-    """Detect identity matrices in a JAX-tracer compatible way.
-
-    Returns indices of identity matrices, padded with -1 to fixed size.
-    This function is compatible with JAX transformations (jit, vmap, etc).
-
-    Args:
-        array: Array of shape (N, D, D) containing transformation matrices
-
-    Returns:
-        Array of indices where identity matrices are found, padded with -1.
-        Maximum size is N (all matrices could theoretically be identity).
-    """
-    N, D, _ = array.shape
+    N, D, _ = array.shape    
     identity = jnp.eye(D)
-    is_identity = jnp.all(jnp.abs(array - identity[None, :, :]) < 1e-6, axis=(1, 2))
-
-    # Use where with size parameter for JAX tracer compatibility
-    # Size=N because at most N matrices can be identity
-    identity_indices = jnp.where(is_identity, size=N, fill_value=-1)[0]
-
+    is_identity = jnp.all(jnp.abs(array - identity[None, :, :]) < 1e-6, axis=(1, 2))    
+    identity_indices = jnp.where(is_identity)[0]
+    
     return identity_indices
 
 
@@ -95,35 +80,17 @@ def get_weight_matrix(words, env_index, input_dim, output_dim):
 
 
 def random_choice(key, total_words, exclude):
-    """Sample a random word index, excluding specified indices.
-
-    Args:
-        key: JAX random key
-        total_words: Total number of words available
-        exclude: Array of indices to exclude (may contain -1 as padding)
-
-    Returns:
-        Random word index, or -1 if no valid choices exist
-    """
     # If exclude is empty, just choose from all words
     if exclude.shape[0] == 0:
         return jax.random.randint(key, (), 0, total_words)
-
+    
     full_range = jnp.arange(total_words)
-
+    
     mask = jnp.ones(total_words, dtype=bool)
-
+    
     def update_mask(i, m):
-        # Skip -1 padding values in exclude array
-        idx = exclude[i]
-        # Only update mask if idx is valid (>= 0 and < total_words)
-        return jax.lax.cond(
-            (idx >= 0) & (idx < total_words),
-            lambda m: m.at[idx].set(False),
-            lambda m: m,
-            m
-        )
-
+        return m.at[exclude[i]].set(False)
+    
     mask = jax.lax.fori_loop(0, exclude.shape[0], update_mask, mask)
     
     no_valid_choices = jnp.all(~mask)
@@ -143,75 +110,6 @@ def random_choice(key, total_words, exclude):
     )
     
     
-
-def initialize_words(config, rng_key):
-    """
-    Initialize words for training based on config.
-
-    This function creates orthogonal transformation matrices (words) for
-    meta-learning environments. Similar to initialize_carry functions,
-    this creates initial state based on configuration, evaluated outside
-    the train loop for JAX compile compatibility.
-
-    Similar to create_words_ex, but also handles dimension slicing
-    based on eval environment configuration.
-
-    Args:
-        config: Configuration dict with ENV, EVAL_ENV settings
-            - config["ENV"].meta_depth: Depth of word tree
-            - config["ENV"].meta_dim: Dimension of meta augmentation
-            - config["ENV"].meta_max_depth: Maximum depth for parallel words
-            - config["ENV"].meta_with_adjoint: Whether to use adjoint matrices
-            - config["ENV"].obs_shape: Shape of observations
-            - config.get("EVAL_ENV").meta_const_aug: Augmentation method (optional)
-        rng_key: JAX random key for generating orthogonal matrices
-
-    Returns:
-        JAX array of words with shape [num_words, input_dim, output_dim]
-        - num_words: 2^meta_max_depth (with or without adjoint)
-        - input_dim: config["ENV"].obs_shape[0]
-        - output_dim: input_dim (for identity mode) or meta_dim (otherwise)
-
-    Example:
-        >>> rng = jax.random.PRNGKey(0)
-        >>> words = initialize_words(config, rng)
-        >>> # Use words in runner_state for training
-    """
-    # Access the underlying MetaEnvironment to get raw parameters
-    # (before any wrappers are applied)
-    env = config["ENV"]
-    while hasattr(env, '_env'):
-        env = env._env
-
-    # Create orthogonal matrices using MetaEnvironment parameters
-    matrices = create_orthogonal_matrices(
-        rng_key,
-        env.meta_depth,
-        size=env.meta_dim,
-        max_depth=env.meta_max_depth,
-        with_adjoint=env.meta_with_adjoint
-    )
-
-    # Generate words from matrices
-    words = create_words(
-        matrices,
-        env.meta_depth,
-        out_size=env.meta_dim,
-        max_depth=env.meta_max_depth
-    )
-
-    # Determine output dimensions based on eval environment configuration
-    input_dim = env.input_dim  # Use MetaEnvironment's input_dim directly
-    use_identity_mode = getattr(config.get("EVAL_ENV"), "meta_const_aug", None) == "identity"
-
-    # Slice words appropriately
-    if use_identity_mode:
-        # For identity mode, match input and output dimensions
-        return words[:, :input_dim, :input_dim]
-    else:
-        # For other modes, truncate input but keep output as meta_dim
-        return words[:, :input_dim, :]
-
 
 class MetaAugNetwork(nn.Module):
     """

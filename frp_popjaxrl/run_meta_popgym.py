@@ -48,11 +48,11 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         from envs.meta_environment_lazy import create_meta_environment
         from algorithms.ppo_in_context_lazy import make_train
     elif mode == "legacy":
-        # Legacy implementation (before FRP state separation)
+        # Legacy implementation (before FRP state separation) 
         from envs.meta_environment_legacy import create_meta_environment
         from algorithms.ppo_in_context_legacy import make_train
     elif mode == "separated":
-        # New implementation with FRP state separation (default)
+        # New implementation with FRP state separation 
         from envs.meta_environment import create_meta_environment
         from algorithms.ppo_in_context import make_train
     else:
@@ -105,8 +105,11 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "ENV_PARAMS": env_params,
         "EVAL_ENV": AliasPrevActionV2(eval_env),
         "EVAL_ENV_PARAMS": eval_env_params,
+        "META_KWARGS": meta_kwargs,
+        "EVAL_META_KWARGS": eval_meta_kwargs,
         "ANNEAL_LR": False,
         "DEBUG": True,
+        "DEBUG_TRACE": (args.debug >= 2),  # Enable RNG trace only with --debug 2 or higher
         "S5_D_MODEL": 256,
         "S5_SSM_SIZE": 256,
         "S5_N_LAYERS": 1,
@@ -136,8 +139,11 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "ENV_PARAMS": env_params,
         "EVAL_ENV": AliasPrevActionV2(eval_env),
         "EVAL_ENV_PARAMS": eval_env_params,
+        "META_KWARGS": meta_kwargs,
+        "EVAL_META_KWARGS": eval_meta_kwargs,
         "ANNEAL_LR": (args.anneal_lr==1),
         "DEBUG": True,
+        "DEBUG_TRACE": (args.debug >= 2),  # Enable RNG trace only with --debug 2 or higher
         "S5_D_MODEL": 256,
         "S5_SSM_SIZE": 256,
         "S5_N_LAYERS": args.s5_n_layers,

@@ -3,6 +3,8 @@ Unified PPO training with in-context learning (eager word creation).
 
 This module supports both GRU and S5 encoders via the MODEL_TYPE configuration parameter.
 Words are created eagerly at initialization and optionally reset each epoch.
+
+FRP handling is separated from environment handling.
 """
 import logging
 from typing import NamedTuple, Dict
@@ -55,27 +57,30 @@ def make_train(config):
     model_type = config.get("MODEL_TYPE", "gru").lower()
     network = create_network(model_type, env.action_space(env_params), config)
 
+    frp_manager = create_frp_manager(config)
+    eval_frp_manager = create_eval_frp_manager(config)
+
+    # Original: Calculate FRP-transformed observation size explicitly
+    # Original obs from env: input_dim + 3 (MetaEnv metadata)
+    # After FRP transform: aug_output_dim + 3 (MetaEnv metadata)
+    # After AliasPrevActionV2 wrapper: + (n+1) where n=num_actions for Discrete
+    base_env_obs_size = env.observation_space(env_params).shape[0]
+    # base_env_obs_size = input_dim + 3 + (n+1)
+    # We need to replace input_dim with aug_output_dim
+    metadata_and_wrapper_size = base_env_obs_size - frp_manager.input_dim
+    frp_transformed_obs_size = frp_manager.aug_output_dim + metadata_and_wrapper_size
+
+    init_x = (jnp.zeros((1, config["NUM_ENVS"], frp_transformed_obs_size)),
+                jnp.zeros((1, config["NUM_ENVS"])))
+
     def train(rng):
         # Initialize max metric tracking
         max_train_metric = float('-inf')
         max_eval_metric = float('-inf')
 
-        # Initialize FRP managers to get correct observation dimensions
-        frp_manager_temp = create_frp_manager(config)
-
-        # Calculate FRP-transformed observation size
-        # Original obs from env: input_dim + 3 (MetaEnv metadata)
-        # After FRP transform: aug_output_dim + 3 (MetaEnv metadata)
-        # After AliasPrevActionV2 wrapper: + (n+1) where n=num_actions for Discrete
-        base_env_obs_size = env.observation_space(env_params).shape[0]
-        # base_env_obs_size = input_dim + 3 + (n+1)
-        # We need to replace input_dim with aug_output_dim
-        metadata_and_wrapper_size = base_env_obs_size - frp_manager_temp.input_dim
-        frp_transformed_obs_size = frp_manager_temp.aug_output_dim + metadata_and_wrapper_size
 
         # INIT NETWORK PARAMETERS
         rng, _rng = jax.random.split(rng)
-        init_x = (jnp.zeros((1, config["NUM_ENVS"], frp_transformed_obs_size)), jnp.zeros((1, config["NUM_ENVS"])))
         init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
         network_params = network.init(_rng, init_hstate, init_x)
         if config["ANNEAL_LR"]:
@@ -94,31 +99,41 @@ def make_train(config):
         # INIT ENV
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
+        # env.reset  is defined by gymnax.environments.environment
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
         init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
 
         # INIT EVAL ENV
         rng, _rng = jax.random.split(rng)
-        reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
-        eval_obsv, eval_env_state = jax.vmap(eval_env.reset, in_axes=(0, None))(reset_rng, eval_env_params)
+        reset_rng_eval = jax.random.split(_rng, config["NUM_ENVS"])
+        eval_obsv, eval_env_state = jax.vmap(eval_env.reset, in_axes=(0, None))(reset_rng_eval, eval_env_params)
         eval_init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
 
-        # Initialize FRP managers
-        frp_manager = create_frp_manager(config)
-        eval_frp_manager = create_eval_frp_manager(config)
-
         # Create initial FRP words
-        rng, _rng = jax.random.split(rng)
-        frp_words = frp_manager.initialize_words(_rng)
+        # CRITICAL FIX: To match RNG consumption with legacy mode, we must split the main RNG here
+        # even though we use meta_kwargs['meta_rng'] for FRP initialization.
+        #
+        # Legacy mode does this (ppo_in_context_legacy.py:114-115):
+        #   rng, _rng = jax.random.split(rng)
+        #   train_words = _create_words(_rng)
+        #
+        # To maintain RNG consumption parity, Separated mode must also split rng:
+        rng, _rng = jax.random.split(rng)  # Split to match legacy RNG consumption
+        # But we still use meta_rng for FRP words (not _rng) for deterministic FRP initialization
+        frp_word_rng = config["META_KWARGS"]["meta_rng"]
+        frp_words = frp_manager.initialize_words(frp_word_rng)
 
-        # Apply FRP transformation to training environment
-        # Sample env_index for each environment and inject into env_state
-        rng, _rng = jax.random.split(rng)
-        sample_rngs = jax.random.split(_rng, config["NUM_ENVS"])
+        # IMPORTANT: To match RNG consumption with legacy mode at initialization,
+        # we derive sample_rng from reset_rng (not from a new RNG split).
+        # Legacy mode: env.reset(reset_rng) → reset_env() → sample env_index
+        # Separated mode: env.reset(reset_rng) → then sample env_index using derived RNG
+        def initialize_frp_single_env(obs, reset_rng_i):
+            # Derive sample RNG from reset_rng to match legacy RNG flow
+            # This replicates the split that happens in reset_env()
+            _, _, index_key = jax.random.split(reset_rng_i, 3)
 
-        def initialize_frp_single_env(obs, sample_rng):
-            # Sample env_index
-            env_index = frp_manager.sample_env_index(frp_words, sample_rng)
+            # Sample env_index using the same RNG that legacy mode would use
+            env_index = frp_manager.sample_env_index(frp_words, index_key)
 
             # Observation structure (from MetaEnvironment + wrappers):
             # [raw_obs (input_dim)] + [MetaEnv metadata (3)] + [AliasPrevActionV2 (n+1)]
@@ -143,7 +158,7 @@ def make_train(config):
 
             return env_index, new_obs
 
-        env_indices, obsv = jax.vmap(initialize_frp_single_env)(obsv, sample_rngs)
+        env_indices, obsv = jax.vmap(initialize_frp_single_env)(obsv, reset_rng)
 
         # Create FRP state
         frp_state = FRPState(env_indices=env_indices, frp_words=frp_words)
@@ -162,6 +177,11 @@ def make_train(config):
             # COLLECT TRAJECTORIES
             def _env_step(runner_state, unused):
                 train_state, env_state, last_obs, last_done, hstate, rng, env_indices = runner_state
+
+                # DEBUG_TRACE: Trace RNG at start of step
+                if config.get("DEBUG_TRACE", False):
+                    jax.debug.callback(lambda r, e: print(f"[SEPARATED] Step start RNG: {r}, env_indices: {e}"), rng, env_indices)
+
                 rng, _rng = jax.random.split(rng)
 
                 # SELECT ACTION
@@ -171,6 +191,11 @@ def make_train(config):
                 log_prob = pi.log_prob(action)
                 value, action, log_prob = value.squeeze(0), action.squeeze(0), log_prob.squeeze(0)
 
+                # DEBUG: Trace action
+                if config.get("DEBUG_TRACE", False):
+                    jax.debug.callback(lambda a, d, e: print(f"[SEPARATED] action={a}, last_done={d}, env_indices={e}"),
+                                     action, last_done, env_indices)
+
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
                 rng_step = jax.random.split(_rng, config["NUM_ENVS"])
@@ -179,15 +204,44 @@ def make_train(config):
                 )
 
                 # Resample env_indices for environments that are done (meta episode ended)
-                rng, _rng = jax.random.split(rng)
-                resample_rngs = jax.random.split(_rng, config["NUM_ENVS"])
+                # IMPORTANT: To match RNG consumption with legacy mode, we derive resample RNG
+                # from rng_step (not from main rng). This ensures deterministic equivalence.
+                # Legacy mode: env.step(rng_step) → auto-reset → reset_env(key_reset) → sample env_index
+                # Separated mode: env.step(rng_step) → then manually resample using derived key
+                def maybe_resample_env_index(rng_step_i, env_idx, is_done):
+                    """Resample env_index if episode is done, using RNG derived from rng_step.
 
-                def maybe_resample_env_index(env_idx, is_done, resample_rng):
-                    """Resample env_index if episode is done, otherwise keep current index."""
-                    new_idx = frp_manager.sample_env_index(frp_state.frp_words, resample_rng)
-                    return jax.lax.select(is_done, new_idx, env_idx)
+                    This matches the RNG consumption pattern in legacy mode:
+                    1. rng_step_i is split inside env.step() → (key, key_reset)
+                    2. key_reset is split in reset_env() → (env_key, obs_key, index_key)
+                    3. index_key is used to sample env_index
 
-                env_indices = jax.vmap(maybe_resample_env_index)(env_indices, done, resample_rngs)
+                    CRITICAL: We only consume RNG when is_done=True to match legacy behavior.
+                    Legacy mode only calls reset_env() (which consumes RNG) when done=True.
+                    """
+                    def resample_branch(_):
+                        # Replicate gymnax env.step() RNG split
+                        key, key_reset = jax.random.split(rng_step_i)
+
+                        # Replicate reset_env() RNG split (matches meta_environment_legacy.py:173)
+                        _, _, index_key = jax.random.split(key_reset, 3)
+
+                        # Sample env_index using the same RNG that legacy mode would use
+                        return frp_manager.sample_env_index(frp_state.frp_words, index_key)
+
+                    def keep_branch(_):
+                        # Don't consume RNG, just return current index
+                        return env_idx
+
+                    # Only consume RNG and resample when episode is done
+                    return jax.lax.cond(is_done, resample_branch, keep_branch, operand=None)
+
+                env_indices = jax.vmap(maybe_resample_env_index)(rng_step, env_indices, done)
+
+                # DEBUG: Trace done, reward, and env_indices after resample
+                if config.get("DEBUG_TRACE", False):
+                    jax.debug.callback(lambda d, r, e: print(f"[SEPARATED] done={d}, reward={r}, new_env_indices={e}"),
+                                     done, reward, env_indices)
 
                 # Apply FRP transformation to observations
                 def apply_frp_transform(obs, env_idx):
@@ -319,8 +373,14 @@ def make_train(config):
 
             # In-Context evaluation
             rng, _rng = jax.random.split(rng)
+
+            # DEBUG_TRACE: Trace eval loop start RNG
+            if config.get("DEBUG_TRACE", False):
+                jax.debug.callback(lambda r: print(f"[SEPARATED] Eval start RNG: {r}"), _rng)
+
             # Reset eval env before collecting trajectory
             reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
+            # env.reset  is defined by gymnax.environments.environment
             eval_partial_reset = lambda x: env.reset(x, eval_env_params)
             eval_obsv, eval_env_state = jax.vmap(eval_partial_reset)(reset_rng)
 
@@ -343,10 +403,14 @@ def make_train(config):
 
             eval_last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
             eval_hstate=initial_hstate
-            
+
             rng, _rng = jax.random.split(rng)
             eval_runner_state = (train_state, eval_env_state, eval_obsv, eval_last_done, eval_hstate, _rng)
             eval_runner_state, eval_traj_batch = jax.lax.scan(_eval_env_step, eval_runner_state, None, config["NUM_STEPS"])
+
+            # DEBUG_TRACE: Trace eval loop end RNG
+            if config.get("DEBUG_TRACE", False):
+                jax.debug.callback(lambda r: print(f"[SEPARATED] Eval end RNG: {r}"), eval_runner_state[-1])
 
             # Calculate metrics using common safe_mean function
             train_metric = safe_mean(traj_batch.info)
@@ -385,6 +449,11 @@ def make_train(config):
 
             # Update frp_state with final env_indices from trajectory collection
             frp_state = frp_state.replace(env_indices=final_env_indices)
+
+            # DEBUG: Track RNG state at end of update
+            if config.get("DEBUG_TRACE", False):
+                jax.debug.callback(lambda r, e: print(f"[SEPARATED] End-of-update RNG: {r}, env_indices: {e}"),
+                                 rng, final_env_indices)
 
             return (train_state, env_state, last_obs, last_done, hstate, rng, frp_state), metrics_dict
 

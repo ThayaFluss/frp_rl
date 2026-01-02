@@ -15,7 +15,6 @@ from .orthogonal import (
     random_choice,
 )
 
-
 @struct.dataclass
 class FRPWords:
     """Dataclass for storing FRP words and metadata.
@@ -76,7 +75,7 @@ class FRPManager:
         input_dim: int,
         meta_max_depth: int,
         meta_with_adjoint: bool,
-        meta_truncate_aug: int,
+        meta_truncate_aug: int
     ):
         """Initialize FRP Manager.
 
@@ -117,7 +116,7 @@ class FRPManager:
         Returns:
             FRPWords dataclass containing words, exclude indices, and total_words
         """
-        # Create orthogonal matrices
+        # Original: Use new orthogonal implementation
         matrices = create_orthogonal_matrices(
             rng_key,
             self.meta_depth,
@@ -126,7 +125,6 @@ class FRPManager:
             with_adjoint=self.meta_with_adjoint
         )
 
-        # Create words by composing matrices
         words = create_words(
             matrices,
             self.meta_depth,
@@ -166,18 +164,31 @@ class FRPManager:
         # Use words.shape[0] instead of total_words for JAX tracer compatibility
         num_words = frp_words.words.shape[0]
 
-        if frp_words.exclude.shape[0] == 0:
-            # No exclusions, sample uniformly
-            return jax.random.randint(
-                rng_key, (), 0, num_words
-            ).astype(jnp.int32)
-        else:
-            # Exclude identity matrices
+        # Check if there are any valid exclusions (>= 0)
+        # exclude array may be empty [] or filled with -1s (no valid exclusions)
+        has_valid_exclusions = jnp.logical_and(
+            frp_words.exclude.shape[0] > 0,
+            jnp.any(frp_words.exclude >= 0)
+        )
+
+        # Use simple randint if no valid exclusions, otherwise use random_choice
+        # This matches legacy behavior exactly
+        def sample_without_exclusion(_):
+            return jax.random.randint(rng_key, (), 0, num_words).astype(jnp.int32)
+
+        def sample_with_exclusion(_):
             return random_choice(
                 rng_key,
                 total_words=num_words,
                 exclude=frp_words.exclude
             ).astype(jnp.int32)
+
+        return jax.lax.cond(
+            has_valid_exclusions,
+            sample_with_exclusion,
+            sample_without_exclusion,
+            operand=None
+        )
 
     def transform_obs(
         self,
@@ -279,13 +290,9 @@ def create_frp_manager(config) -> FRPManager:
     from a config dict and creates an FRPManager instance.
 
     Args:
-        config: Configuration dict with ENV settings
-            - config["ENV"].meta_depth
-            - config["ENV"].meta_dim
-            - config["ENV"].input_dim
-            - config["ENV"].meta_max_depth
-            - config["ENV"].meta_with_adjoint
-            - config["ENV"].meta_truncate_aug
+        config: Configuration dict with META_KWARGS and ENV settings
+            - config["META_KWARGS"]: meta learning parameters
+            - config["ENV"]: environment (for input_dim)
 
     Returns:
         Initialized FRPManager instance
@@ -294,18 +301,20 @@ def create_frp_manager(config) -> FRPManager:
         >>> manager = create_frp_manager(config)
         >>> frp_words = manager.initialize_words(rng)
     """
-    # Unwrap environment to get base MetaEnvironment
+    # Unwrap environment to get base MetaEnvironment for input_dim
     env = config["ENV"]
     while hasattr(env, '_env'):
         env = env._env
 
+    meta_kwargs = config["META_KWARGS"]
+
     return FRPManager(
-        meta_depth=env.meta_depth,
-        meta_dim=env.meta_dim,
+        meta_depth=meta_kwargs.get('meta_depth', 1),
+        meta_dim=meta_kwargs.get('meta_dim', 4),
         input_dim=env.input_dim,
-        meta_max_depth=env.meta_max_depth,
-        meta_with_adjoint=env.meta_with_adjoint,
-        meta_truncate_aug=env.meta_truncate_aug,
+        meta_max_depth=meta_kwargs.get('meta_max_depth', 2),
+        meta_with_adjoint=meta_kwargs.get('meta_with_adjoint', False),
+        meta_truncate_aug=meta_kwargs.get('meta_truncate_aug', 0),
     )
 
 
@@ -316,9 +325,10 @@ def create_eval_frp_manager(config) -> Optional[EvalFRPManager]:
     and creates an appropriate EvalFRPManager if required.
 
     Args:
-        config: Configuration dict with ENV and EVAL_ENV settings
-            - config["ENV"]: Base environment config
-            - config.get("EVAL_ENV").meta_const_aug: Evaluation method
+        config: Configuration dict with META_KWARGS, EVAL_META_KWARGS and ENV settings
+            - config["EVAL_META_KWARGS"]: evaluation meta learning parameters
+            - config["META_KWARGS"]: training meta learning parameters
+            - config["ENV"]: environment (for input_dim)
 
     Returns:
         EvalFRPManager instance or None if no eval transformation needed
@@ -328,24 +338,29 @@ def create_eval_frp_manager(config) -> Optional[EvalFRPManager]:
         >>> if eval_manager:
         ...     transformed_obs = eval_manager.transform_obs(obs)
     """
-    # Unwrap environment to get base MetaEnvironment
+    # Unwrap environment to get base MetaEnvironment for input_dim
     env = config["ENV"]
     while hasattr(env, '_env'):
         env = env._env
 
-    # Get evaluation environment config
-    eval_env = config.get("EVAL_ENV")
-    method = getattr(eval_env, "meta_const_aug", None) if eval_env else None
+    # Get evaluation method from EVAL_META_KWARGS
+    eval_meta_kwargs = config.get("EVAL_META_KWARGS", {})
+    method = eval_meta_kwargs.get("meta_const_aug", None)
 
     # Only create eval manager for known methods
     if method in ["padding", "tiling", "identity"]:
+        # Get meta_kwargs for dimension parameters
+        meta_kwargs = config["META_KWARGS"]
+        meta_truncate_aug = meta_kwargs.get('meta_truncate_aug', 0)
+        meta_dim = meta_kwargs.get('meta_dim', 4)
+
         # Determine output dimension based on method and truncation
         if method == "identity":
             output_dim = env.input_dim
-        elif env.meta_truncate_aug == 1:
+        elif meta_truncate_aug == 1:
             output_dim = env.input_dim
         else:
-            output_dim = env.meta_dim
+            output_dim = meta_dim
 
         return EvalFRPManager(
             method=method,

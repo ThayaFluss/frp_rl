@@ -74,6 +74,7 @@ def make_train(config):
         # INIT ENV
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
+        # env.reset  is defined by gymnax.environments.environment
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
         init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
 
@@ -116,6 +117,9 @@ def make_train(config):
         # Set the words in environments
         env.words = train_words
 
+        # Note: Cannot log env_indices here as they are inside JIT-compiled env_state
+        # Legacy mode stores env_index in MetaEnvState, sampled during env.reset()
+
         # TRAIN LOOP
         def _update_step(runner_state, unused):
             # Unpack state including words
@@ -135,6 +139,11 @@ def make_train(config):
             # COLLECT TRAJECTORIES
             def _env_step(runner_state, unused):
                 train_state, env_state, last_obs, last_done, hstate, rng = runner_state
+
+                # DEBUG_TRACE: Trace RNG at start of step
+                if config.get("DEBUG_TRACE", False):
+                    jax.debug.callback(lambda r: print(f"[LEGACY] Step start RNG: {r}"), rng)
+
                 rng, _rng = jax.random.split(rng)
 
                 # SELECT ACTION
@@ -144,12 +153,21 @@ def make_train(config):
                 log_prob = pi.log_prob(action)
                 value, action, log_prob = value.squeeze(0), action.squeeze(0), log_prob.squeeze(0)
 
+                # DEBUG: Trace action
+                if config.get("DEBUG_TRACE", False):
+                    jax.debug.callback(lambda a, d: print(f"[LEGACY] action={a}, last_done={d}"), action, last_done)
+
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
                 rng_step = jax.random.split(_rng, config["NUM_ENVS"])
                 obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0,None))(
                     rng_step, env_state, action, env_params
                 )
+
+                # DEBUG: Trace done and reward
+                if config.get("DEBUG_TRACE", False):
+                    jax.debug.callback(lambda d, r: print(f"[LEGACY] done={d}, reward={r}"), done, reward)
+
                 transition = Transition(last_done, action, value, reward, log_prob, last_obs, info)
                 runner_state = (train_state, env_state, obsv, done, hstate, rng)
                 return runner_state, transition
@@ -243,18 +261,27 @@ def make_train(config):
                 runner_state = (train_state, env_state, obsv, done, hstate, rng)
                 return runner_state, transition
 
-            # In-Context evaluation 
+            # In-Context evaluation
             rng, _rng = jax.random.split(rng)
+
+            # DEBUG_TRACE: Trace eval loop start RNG
+            if config.get("DEBUG_TRACE", False):
+                jax.debug.callback(lambda r: print(f"[LEGACY] Eval start RNG: {r}"), _rng)
+
             # Reset eval env before collecting trajectly
             reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
             eval_partial_reset = lambda x: env.reset(x, eval_env_params)
             eval_obsv, eval_env_state = jax.vmap(eval_partial_reset)(reset_rng)
             eval_last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
             eval_hstate=initial_hstate
-            
+
             rng, _rng = jax.random.split(rng)
             eval_runner_state = (train_state, eval_env_state, eval_obsv, eval_last_done, eval_hstate, _rng)
             eval_runner_state, eval_traj_batch = jax.lax.scan(_eval_env_step, eval_runner_state, None, config["NUM_STEPS"])
+
+            # DEBUG_TRACE: Trace eval loop end RNG
+            if config.get("DEBUG_TRACE", False):
+                jax.debug.callback(lambda r: print(f"[LEGACY] Eval end RNG: {r}"), eval_runner_state[-1])
 
             # Calculate metrics using common safe_mean function
             train_metric = safe_mean(traj_batch.info)
@@ -290,6 +317,10 @@ def make_train(config):
                 "train_episode_done_count": train_episode_done_count,
                 "eval_episode_done_count": eval_episode_done_count,
             }
+
+            # DEBUG: Track RNG state at end of update
+            if config.get("DEBUG_TRACE", False):
+                jax.debug.callback(lambda r: print(f"[LEGACY] End-of-update RNG: {r}"), rng)
 
             return (train_state, env_state, last_obs, last_done, hstate, rng, words), metrics_dict
 

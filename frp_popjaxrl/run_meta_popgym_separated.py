@@ -1,12 +1,24 @@
+"""
+Training script for SEPARATED mode ONLY.
+
+IMPORTANT: This file is exclusively for SEPARATED mode.
+- FRP state management is externalized from MetaEnvironment
+- env_index is managed by FRPManager, not stored in environment state
+- Training and evaluation use INDEPENDENT RNG seeds
+- For legacy/lazy modes, use run_meta_popgym.py
+
+Key differences from legacy/lazy:
+- --eval_seed: Separate RNG seed for evaluation (default: seed + 10000)
+- Evaluation FRP words are created independently from training FRP words
+- No RNG dependencies between training and evaluation paths
+"""
 import jax
 import jax.numpy as jnp
 import jax.profiler
 import time
 import logging
 from envs.wrappers import AliasPrevActionV2
-
 from utils.checkpoint import create_experiment_directory, save_config_yaml, save_checkpoint, save_run_info
-
 import argparse
 
 # Configure logging
@@ -17,14 +29,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Dispatcher: imports will be selected based on --mode flag
+# SEPARATED mode imports
+from envs.meta_environment_separated import create_meta_environment
+from algorithms.ppo_in_context_separated import make_train
 
-def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_kwargs={}, norm_kwargs={}, mode="v1", wandb_run_id=None):
+
+def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_kwargs={}, norm_kwargs={}, wandb_run_id=None):
     """
-    Run training with specified implementation mode.
+    Run training with SEPARATED mode implementation.
 
-    Args:
-        mode: "v1" (original) or "lazy" (lazy evaluation)
+    Key features:
+    - Independent RNG for training and evaluation
+    - FRP state managed externally from environment
     """
     # Configure JAX profiling options
     jax_enable_compile_log = (args.jax_profile >= 1)
@@ -40,34 +56,35 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         logger.info("JAX profiling: COMPILE_LOG + PROFILER")
 
     logger.info("="*50)
-    logger.info(f"Running in mode: {mode}")
+    logger.info("Running in mode: SEPARATED")
     logger.info("="*50)
 
-    # Dispatcher: import appropriate modules based on mode
-    if mode == "lazy":
-        from envs.meta_environment_lazy import create_meta_environment
-        from algorithms.ppo_in_context_lazy import make_train
-    elif mode == "legacy":
-        # Legacy implementation (before FRP state separated)
-        from envs.meta_environment_legacy import create_meta_environment
-        from algorithms.ppo_in_context_legacy import make_train
-    else:
-        raise ValueError(f"Unknown mode: {mode}. Valid modes are: 'legacy', 'lazy'. For separated mode, use run_meta_popgym_separated.py")
+    # Setup training RNG
+    train_seed = args.seed
+    train_rng = jax.random.PRNGKey(train_seed)
+    train_rng, _train_rng = jax.random.split(train_rng)
+    meta_kwargs["meta_rng"] = _train_rng
 
-    rng = jax.random.PRNGKey(args.seed)
-    rng, _rng = jax.random.split(rng)
-    meta_kwargs["meta_rng"] = _rng
+    logger.info(f"Training seed: {train_seed}")
+
     if args.eval_method == "identity":
         meta_kwargs["meta_truncate_aug"] = 1
     env = create_meta_environment(env_name, env_kwargs, meta_kwargs, norm_kwargs)
     env_params = env.default_params
 
+    # Setup evaluation RNG (completely independent from training)
+    eval_seed = args.eval_seed if args.eval_seed is not None else (args.seed + 10000)
+    eval_rng = jax.random.PRNGKey(eval_seed)
+
+    logger.info(f"Evaluation seed: {eval_seed} (independent from training)")
+
     eval_env_kwargs = env_kwargs.copy()
     eval_meta_kwargs = meta_kwargs.copy()
     eval_norm_kwargs = norm_kwargs.copy() if norm_kwargs else None
-    # use indep random vars for eval
-    rng, _rng = jax.random.split(rng)
-    eval_meta_kwargs["meta_rng"] = _rng
+
+    # Use independent eval RNG (not derived from training RNG)
+    eval_rng, _eval_rng = jax.random.split(eval_rng)
+    eval_meta_kwargs["meta_rng"] = _eval_rng
     eval_meta_kwargs["meta_eval"] = True
     eval_meta_kwargs["num_trials_per_episode"] = args.eval_num_trials
 
@@ -87,8 +104,8 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "MODEL_TYPE": arch,  # 'gru' or 's5'
         "LR": 2.5e-4,
         "NUM_ENVS": 2,
-        "NUM_STEPS": 16,  # Reduced from 128
-        "TOTAL_TIMESTEPS": 1e3,  # Reduced from 1e4
+        "NUM_STEPS": 16,
+        "TOTAL_TIMESTEPS": 1e3,
         "UPDATE_EPOCHS": 2,
         "NUM_MINIBATCHES":2,
         "GAMMA": 0.99,
@@ -105,7 +122,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "EVAL_META_KWARGS": eval_meta_kwargs,
         "ANNEAL_LR": False,
         "DEBUG": True,
-        "DEBUG_TRACE": (args.debug >= 2),  # Enable RNG trace only with --debug 2 or higher
+        "DEBUG_TRACE": (args.debug >= 2),
         "S5_D_MODEL": 256,
         "S5_SSM_SIZE": 256,
         "S5_N_LAYERS": 1,
@@ -139,7 +156,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "EVAL_META_KWARGS": eval_meta_kwargs,
         "ANNEAL_LR": (args.anneal_lr==1),
         "DEBUG": True,
-        "DEBUG_TRACE": (args.debug >= 2),  # Enable RNG trace only with --debug 2 or higher
+        "DEBUG_TRACE": (args.debug >= 2),
         "S5_D_MODEL": 256,
         "S5_SSM_SIZE": 256,
         "S5_N_LAYERS": args.s5_n_layers,
@@ -151,7 +168,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "RESET_WORDS": (args.reset_words==1)
         }
 
-    rngs = jax.random.split(rng, num_runs)
+    rngs = jax.random.split(train_rng, num_runs)
     info_dict = {}
 
     if arch == "s5":
@@ -215,7 +232,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             "time/run_time": run_s5_time,
             "time/total_time": total_s5_time,
         })
-    
+
     elif arch == "gru":
         logger.info("Starting GRU compilation...")
         train_vjit_rnn = jax.jit(jax.vmap(make_train(config)))
@@ -277,7 +294,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             "time/run_time": run_rnn_time,
             "time/total_time": total_rnn_time,
         })
-    
+
     else:
         raise NotImplementedError
 
@@ -359,7 +376,10 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
 
 if __name__ == "__main__":
     import wandb
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="Training script for SEPARATED mode (FRP state externalized)"
+    )
     parser.add_argument("--num_runs", type=int, default=1,
                         help="Number of training runs (default: %(default)s)")
     parser.add_argument("--env", type=str, default="cartpole",
@@ -374,6 +394,8 @@ if __name__ == "__main__":
                         help="JAX profiling level: 0=disabled, 1=compile_log, 2=profiler+compile_log (default: %(default)s)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for training (default: %(default)s)")
+    parser.add_argument("--eval_seed", type=int, default=None,
+                        help="Random seed for evaluation. If None, uses seed + 10000 for complete independence (default: %(default)s)")
 
     ### For meta envs
     parser.add_argument("--dim", type=int, default=128,
@@ -400,7 +422,7 @@ if __name__ == "__main__":
                         help="Reward normalization strategy: dynamic/fixed/minmax/custom (default: %(default)s)")
     parser.add_argument("--norm_max_steps", type=int, default=200,
                         help="Maximum steps for reward normalization scaling (default: %(default)s)")
-    
+
     ### For saving results and models
     parser.add_argument("--save_results", type=int, default=0,
                         help="Save results npy (default: %(default)s)")
@@ -437,12 +459,8 @@ if __name__ == "__main__":
     parser.add_argument("--s5_do_gtrxl_norm", type=int, default=0,
                         help="S5 GTrXL normalization: 0 or 1 (default: %(default)s)")
 
-    ### Dispatcher: select implementation version
-    parser.add_argument("--mode", type=str, default="legacy",
-                        help="Implementation mode: legacy (original) or lazy (lazy evaluation). For separated mode, use run_meta_popgym_separated.py (default: %(default)s)")
-
     args = parser.parse_args()
-    
+
     # Meta environment specific kwargs
     meta_kwargs = {
         "meta_depth": args.depth,
@@ -463,4 +481,4 @@ if __name__ == "__main__":
 
     wandb.init(project=args.log_wandb, config=args)
     wandb_run_id = wandb.run.id if wandb.run else None
-    run(args, args.num_runs, args.env, args.arch, env_kwargs=env_kwargs, meta_kwargs=meta_kwargs, norm_kwargs=norm_kwargs, mode=args.mode, wandb_run_id=wandb_run_id)
+    run(args, args.num_runs, args.env, args.arch, env_kwargs=env_kwargs, meta_kwargs=meta_kwargs, norm_kwargs=norm_kwargs, wandb_run_id=wandb_run_id)

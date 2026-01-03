@@ -40,7 +40,7 @@ from .environments import (
     RepeatPreviousMedium,
     RepeatPreviousHard,
 )
-from .meta_environment import create_meta_environment
+from .meta_environment_separated import create_meta_environment
 
 def make(env_id: str, **kwargs):
     """Create and register an environment by ID.

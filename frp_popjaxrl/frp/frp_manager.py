@@ -101,22 +101,22 @@ class FRPManager:
             self.aug_output_dim = meta_dim
 
     def initialize_words(self, rng_key: chex.PRNGKey) -> FRPWords:
-        """Initialize FRP words and metadata.
+        """Initialize FRP words and metadata (SEPARATED mode - no identity exclusion).
 
         This method creates the orthogonal transformation matrices (words) that
         will be used for observation augmentation. The process:
         1. Create base orthogonal matrices using QR decomposition
         2. Compose matrices to create 2^meta_max_depth unique words
-        3. Detect identity matrices to exclude from sampling
-        4. Truncate words to appropriate dimensions
+        3. Truncate words to appropriate dimensions
+
+        NOTE: Separated mode does NOT exclude identity matrices (simplified implementation).
 
         Args:
             rng_key: JAX random key for generating orthogonal matrices
 
         Returns:
-            FRPWords dataclass containing words, exclude indices, and total_words
+            FRPWords dataclass containing words, empty exclude array, and total_words
         """
-        # Original: Use new orthogonal implementation
         matrices = create_orthogonal_matrices(
             rng_key,
             self.meta_depth,
@@ -132,9 +132,8 @@ class FRPManager:
             max_depth=self.meta_max_depth
         )
 
-        # Detect identity matrices BEFORE truncation
-        # This is important because we want to exclude identities from sampling
-        exclude = detect_identity_matrices(words)
+        # SEPARATED MODE: No identity detection (simplified)
+        exclude = jnp.array([], dtype=jnp.int32)
 
         # Truncate words based on configuration
         if self.meta_truncate_aug == 1:
@@ -149,10 +148,12 @@ class FRPManager:
         return FRPWords(words=words, exclude=exclude, total_words=total_words)
 
     def sample_env_index(self, frp_words: FRPWords, rng_key: chex.PRNGKey) -> int:
-        """Sample an environment index for FRP transformation.
+        """Sample an environment index for FRP transformation (SEPARATED mode - no exclusion).
 
-        Samples a random word index, excluding identity matrices if any exist.
+        Samples a random word index using simple uniform sampling.
         This function is JIT-compatible and uses JAX's random sampling.
+
+        NOTE: Separated mode does NOT exclude identity matrices (simplified implementation).
 
         Args:
             frp_words: FRPWords dataclass with words and metadata
@@ -161,34 +162,8 @@ class FRPManager:
         Returns:
             Integer index in range [0, total_words)
         """
-        # Use words.shape[0] instead of total_words for JAX tracer compatibility
         num_words = frp_words.words.shape[0]
-
-        # Check if there are any valid exclusions (>= 0)
-        # exclude array may be empty [] or filled with -1s (no valid exclusions)
-        has_valid_exclusions = jnp.logical_and(
-            frp_words.exclude.shape[0] > 0,
-            jnp.any(frp_words.exclude >= 0)
-        )
-
-        # Use simple randint if no valid exclusions, otherwise use random_choice
-        # This matches legacy behavior exactly
-        def sample_without_exclusion(_):
-            return jax.random.randint(rng_key, (), 0, num_words).astype(jnp.int32)
-
-        def sample_with_exclusion(_):
-            return random_choice(
-                rng_key,
-                total_words=num_words,
-                exclude=frp_words.exclude
-            ).astype(jnp.int32)
-
-        return jax.lax.cond(
-            has_valid_exclusions,
-            sample_with_exclusion,
-            sample_without_exclusion,
-            operand=None
-        )
+        return jax.random.randint(rng_key, (), 0, num_words).astype(jnp.int32)
 
     def transform_obs(
         self,

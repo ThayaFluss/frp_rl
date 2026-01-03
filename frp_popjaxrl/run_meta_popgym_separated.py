@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # SEPARATED mode imports
 from envs.meta_environment_separated import create_meta_environment
-from algorithms.ppo_in_context_separated import make_train
+from algorithms.ppo_frp_separated import make_train
 
 
 def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_kwargs={}, norm_kwargs={}, wandb_run_id=None):
@@ -120,6 +120,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "EVAL_ENV_PARAMS": eval_env_params,
         "META_KWARGS": meta_kwargs,
         "EVAL_META_KWARGS": eval_meta_kwargs,
+        "EVAL_SEED": eval_seed,
         "ANNEAL_LR": False,
         "DEBUG": True,
         "DEBUG_TRACE": (args.debug >= 2),
@@ -154,6 +155,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "EVAL_ENV_PARAMS": eval_env_params,
         "META_KWARGS": meta_kwargs,
         "EVAL_META_KWARGS": eval_meta_kwargs,
+        "EVAL_SEED": eval_seed,
         "ANNEAL_LR": (args.anneal_lr==1),
         "DEBUG": True,
         "DEBUG_TRACE": (args.debug >= 2),
@@ -386,7 +388,7 @@ if __name__ == "__main__":
                         help="Base env XXX of MetaXXX (default: %(default)s)")
     parser.add_argument("--arch", type=str, default="s5",
                         help="Architecture: gru or s5 (default: %(default)s)")
-    parser.add_argument("--log_wandb", type=str, default="popgym",
+    parser.add_argument("--log_wandb", type=str, default="popgym_separated",
                         help="Wandb project name (default: %(default)s)")
     parser.add_argument("--debug", type=int, default=0,
                         help="Debug mode: 0 or 1 (default: %(default)s)")

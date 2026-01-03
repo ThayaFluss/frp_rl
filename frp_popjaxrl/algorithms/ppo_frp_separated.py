@@ -1,10 +1,16 @@
 """
-Unified PPO training with in-context learning (eager word creation).
+PPO training with FRP (Function-space Representation Probe) - SEPARATED mode.
 
-This module supports both GRU and S5 encoders via the MODEL_TYPE configuration parameter.
-Words are created eagerly at initialization and optionally reset each epoch.
+This module implements PPO training where FRP state management is externalized from
+the environment. Key features:
 
-FRP handling is separated from environment handling.
+- FRP state (env_indices, frp_words) managed separately from MetaEnvironment
+- Independent RNG for training and evaluation (completely decoupled)
+- Evaluation uses fixed eval_seed for deterministic, reproducible results
+- Supports both GRU and S5 encoders via MODEL_TYPE configuration
+- FRP words created eagerly at initialization and optionally reset each epoch
+
+For legacy/lazy modes (FRP integrated into environment), use ppo_in_context_legacy.py
 """
 import logging
 from typing import NamedTuple, Dict
@@ -102,12 +108,6 @@ def make_train(config):
         # env.reset  is defined by gymnax.environments.environment
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
         init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
-
-        # INIT EVAL ENV
-        rng, _rng = jax.random.split(rng)
-        reset_rng_eval = jax.random.split(_rng, config["NUM_ENVS"])
-        eval_obsv, eval_env_state = jax.vmap(eval_env.reset, in_axes=(0, None))(reset_rng_eval, eval_env_params)
-        eval_init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
 
         # Create initial FRP words
         # CRITICAL FIX: To match RNG consumption with legacy mode, we must split the main RNG here
@@ -329,23 +329,29 @@ def make_train(config):
             metric = traj_batch.info
             rng = update_state[-1]
 
-            # EVALUATION
-            def _eval_env_step(runner_state, unused):
-                train_state, env_state, last_obs, last_done, hstate, rng = runner_state
-                rng, _rng = jax.random.split(rng)
+            # Update frp_state with final env_indices from trajectory collection
+            frp_state = frp_state.replace(env_indices=final_env_indices)
 
-                # SELECT ACTION
-                ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
-                hstate, pi, value = network.apply(train_state.params, hstate, ac_in)
-                action = pi.sample(seed=_rng)
+            # Prepare next runner_state for training (independent of evaluation)
+            next_runner_state = (train_state, env_state, last_obs, last_done, hstate, rng, frp_state)
+
+            # EVALUATION (side-effect only, doesn't affect training state)
+            def _eval_env_step(runner_state, unused):
+                train_state, eval_env_state, eval_last_obs, eval_last_done, eval_hstate, eval_rng = runner_state
+                eval_rng, _eval_rng = jax.random.split(eval_rng)
+
+                # SELECT ACTION (using trained params, but eval hidden state)
+                ac_in = (eval_last_obs[np.newaxis, :], eval_last_done[np.newaxis, :])
+                eval_hstate, pi, value = network.apply(train_state.params, eval_hstate, ac_in)
+                action = pi.sample(seed=_eval_rng)
                 log_prob = pi.log_prob(action)
                 value, action, log_prob = value.squeeze(0), action.squeeze(0), log_prob.squeeze(0)
 
-                # STEP ENV
-                rng, _rng = jax.random.split(rng)
-                rng_step = jax.random.split(_rng, config["NUM_ENVS"])
-                obsv, env_state, reward, done, info = jax.vmap(eval_env.step, in_axes=(0,0,0,None))(
-                    rng_step, env_state, action, eval_env_params
+                # STEP EVAL ENV (completely independent from training env)
+                eval_rng, _eval_rng = jax.random.split(eval_rng)
+                eval_rng_step = jax.random.split(_eval_rng, config["NUM_ENVS"])
+                eval_obsv, eval_env_state, reward, done, info = jax.vmap(eval_env.step, in_axes=(0,0,0,None))(
+                    eval_rng_step, eval_env_state, action, eval_env_params
                 )
 
                 # Apply evaluation FRP transformation
@@ -365,21 +371,23 @@ def make_train(config):
                     # Reconstruct full observation
                     return jnp.concatenate([transformed_obs, rest])
 
-                obsv = jax.vmap(apply_eval_frp_transform)(obsv)
+                eval_obsv = jax.vmap(apply_eval_frp_transform)(eval_obsv)
 
-                transition = Transition(last_done, action, value, reward, log_prob, last_obs, info)
-                runner_state = (train_state, env_state, obsv, done, hstate, rng)
+                transition = Transition(eval_last_done, action, value, reward, log_prob, eval_last_obs, info)
+                runner_state = (train_state, eval_env_state, eval_obsv, done, eval_hstate, eval_rng)
                 return runner_state, transition
 
             # In-Context evaluation
-            rng, _rng = jax.random.split(rng)
+            # CRITICAL: Use fixed eval_seed for deterministic evaluation
+            # Generate fresh RNG from eval_seed every evaluation (xland-minigrid pattern)
+            eval_rng = jax.random.key(config["EVAL_SEED"])
 
             # DEBUG_TRACE: Trace eval loop start RNG
             if config.get("DEBUG_TRACE", False):
-                jax.debug.callback(lambda r: print(f"[SEPARATED] Eval start RNG: {r}"), _rng)
+                jax.debug.callback(lambda r: print(f"[SEPARATED] Eval start RNG: {r}"), eval_rng)
 
             # Reset eval env before collecting trajectory
-            reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
+            reset_rng = jax.random.split(eval_rng, config["NUM_ENVS"])
             # env.reset  is defined by gymnax.environments.environment
             eval_partial_reset = lambda x: env.reset(x, eval_env_params)
             eval_obsv, eval_env_state = jax.vmap(eval_partial_reset)(reset_rng)
@@ -402,10 +410,15 @@ def make_train(config):
             eval_obsv = jax.vmap(apply_eval_frp_transform_init)(eval_obsv)
 
             eval_last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
-            eval_hstate=initial_hstate
 
-            rng, _rng = jax.random.split(rng)
-            eval_runner_state = (train_state, eval_env_state, eval_obsv, eval_last_done, eval_hstate, _rng)
+            # Initialize eval hidden state (deterministic zero initialization)
+            # Always starts from the same initial state for reproducible evaluation
+            eval_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
+
+            # Use eval_rng for evaluation step loop (not training rng)
+            # This ensures evaluation doesn't affect training RNG consumption
+            eval_step_rng = jax.random.fold_in(eval_rng, 0)
+            eval_runner_state = (train_state, eval_env_state, eval_obsv, eval_last_done, eval_hstate, eval_step_rng)
             eval_runner_state, eval_traj_batch = jax.lax.scan(_eval_env_step, eval_runner_state, None, config["NUM_STEPS"])
 
             # DEBUG_TRACE: Trace eval loop end RNG
@@ -414,48 +427,45 @@ def make_train(config):
 
             # Calculate metrics using common safe_mean function
             train_metric = safe_mean(traj_batch.info)
-            in_context_metric = safe_mean(eval_traj_batch.info)
+            eval_metric = safe_mean(eval_traj_batch.info)
 
             # Count episode done events (episode end = reset_env will be used next step)
             train_episode_done_count = traj_batch.done.sum()
             eval_episode_done_count = eval_traj_batch.done.sum()
 
-            def callback(train_metric, in_context_metric, train_done, eval_done):
+            def callback(train_metric, eval_metric, train_done, eval_done):
                 nonlocal max_train_metric, max_eval_metric
 
                 # Update max values
                 max_train_metric = max(max_train_metric, float(train_metric))
-                max_eval_metric = max(max_eval_metric, float(in_context_metric))
+                max_eval_metric = max(max_eval_metric, float(eval_metric))
 
-                logger.info(f"Train metric: {train_metric}, In-context: {in_context_metric}")
+                logger.info(f"Train metric: {train_metric}, Eval metric: {eval_metric}")
                 logger.info(f"Train episode done: {train_done}, Eval episode done: {eval_done}")
                 wandb.log({
-                        "metric": train_metric,
-                        "eval_metric": in_context_metric,
-                        "max_metric": max_train_metric,
-                        "max_eval_metric": max_eval_metric,
-                        "train_episode_done_count": train_done,
-                        "eval_episode_done_count": eval_done,
+                        "train/metric": train_metric,
+                        "train/max_metric": max_train_metric,
+                        "train/episode_done_count": train_done,
+                        "eval/metric": eval_metric,
+                        "eval/max_metric": max_eval_metric,
+                        "eval/episode_done_count": eval_done,
                 })
-            jax.debug.callback(callback, train_metric, in_context_metric, train_episode_done_count, eval_episode_done_count)
+            jax.debug.callback(callback, train_metric, eval_metric, train_episode_done_count, eval_episode_done_count)
 
             # Create metrics dictionary
             metrics_dict = {
                 "train_metric": train_metric,
-                "in_context_metric": safe_mean(eval_traj_batch.info),
+                "eval_metric": eval_metric,
                 "train_episode_done_count": train_episode_done_count,
                 "eval_episode_done_count": eval_episode_done_count,
             }
-
-            # Update frp_state with final env_indices from trajectory collection
-            frp_state = frp_state.replace(env_indices=final_env_indices)
 
             # DEBUG: Track RNG state at end of update
             if config.get("DEBUG_TRACE", False):
                 jax.debug.callback(lambda r, e: print(f"[SEPARATED] End-of-update RNG: {r}, env_indices: {e}"),
                                  rng, final_env_indices)
 
-            return (train_state, env_state, last_obs, last_done, hstate, rng, frp_state), metrics_dict
+            return next_runner_state, metrics_dict
 
         rng, _rng = jax.random.split(rng)
         last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)

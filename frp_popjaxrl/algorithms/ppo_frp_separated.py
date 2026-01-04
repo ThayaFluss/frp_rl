@@ -159,7 +159,7 @@ def make_train(config):
         frp_state = FRPState(env_indices=env_indices, frp_words=frp_words)
 
         # TRAIN LOOP
-        def _update_step(runner_state, unused):
+        def _update_step(runner_state, update_idx):
             # Unpack state including frp_state
             train_state, env_state, obsv, last_done, hstate, rng, frp_state = runner_state
 
@@ -338,20 +338,21 @@ def make_train(config):
             train_mer = safe_mean(traj_batch.info)
             train_episode_done_count = traj_batch.done.sum()
 
-            def train_callback(train_mer, train_done):
+            def train_callback(train_mer, train_done, step):
                 nonlocal max_train_mer
 
                 # Update MMER (Max Mean Episodic Return) for training
                 max_train_mer = max(max_train_mer, float(train_mer))
 
+                logger.info(f"[Step {int(step)}]")
                 logger.info(f"Train MER: {train_mer:.6f}, MMER: {max_train_mer:.6f}, #Done: {train_done}")
                 wandb.log({
                     "train/mer": train_mer,
                     "train/mmer": max_train_mer,
                     "train/episode_done_count": train_done,
-                })
+                }, step=int(step))
 
-            jax.debug.callback(train_callback, train_mer, train_episode_done_count)
+            jax.debug.callback(train_callback, train_mer, train_episode_done_count, update_idx)
 
             # EVALUATION (side-effect only, doesn't affect training state)
             def _eval_env_step(runner_state, unused):
@@ -450,7 +451,7 @@ def make_train(config):
             eval_mer = safe_mean(eval_traj_batch.info)
             eval_episode_done_count = eval_traj_batch.done.sum()
 
-            def eval_callback(eval_mer, eval_done):
+            def eval_callback(eval_mer, eval_done, step):
                 nonlocal max_eval_mer
 
                 # Update MMER (Max Mean Episodic Return) for evaluation
@@ -461,9 +462,9 @@ def make_train(config):
                     "eval/mer": eval_mer,
                     "eval/mmer": max_eval_mer,
                     "eval/episode_done_count": eval_done,
-                })
+                }, step=int(step))
 
-            jax.debug.callback(eval_callback, eval_mer, eval_episode_done_count)
+            jax.debug.callback(eval_callback, eval_mer, eval_episode_done_count, update_idx)
 
             # Create metrics dictionary
             metrics_dict = {
@@ -486,7 +487,7 @@ def make_train(config):
         last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
 
         runner_state = (train_state, env_state, obsv, last_done, init_hstate, _rng, frp_state)
-        runner_state, metrics = jax.lax.scan(_update_step, runner_state, None, config["NUM_UPDATES"])
+        runner_state, metrics = jax.lax.scan(_update_step, runner_state, jnp.arange(config["NUM_UPDATES"]))
 
         # Get the final metrics from the last update
         final_metrics = jax.tree_util.tree_map(lambda x: x[-1], metrics)

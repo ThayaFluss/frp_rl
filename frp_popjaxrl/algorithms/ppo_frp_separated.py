@@ -334,6 +334,25 @@ def make_train(config):
             # Prepare next runner_state for training (independent of evaluation)
             next_runner_state = (train_state, env_state, last_obs, last_done, hstate, rng, frp_state)
 
+            # Calculate train MER (Mean Episodic Return) and log immediately after training
+            train_mer = safe_mean(traj_batch.info)
+            train_episode_done_count = traj_batch.done.sum()
+
+            def train_callback(train_mer, train_done):
+                nonlocal max_train_mer
+
+                # Update MMER (Max Mean Episodic Return) for training
+                max_train_mer = max(max_train_mer, float(train_mer))
+
+                logger.info(f"Train MER: {train_mer:.6g}, MMER: {max_train_mer:.6g}, Episodes done: {train_done}")
+                wandb.log({
+                    "train/mer": train_mer,
+                    "train/mmer": max_train_mer,
+                    "train/episode_done_count": train_done,
+                })
+
+            jax.debug.callback(train_callback, train_mer, train_episode_done_count)
+
             # EVALUATION (side-effect only, doesn't affect training state)
             def _eval_env_step(runner_state, unused):
                 train_state, eval_env_state, eval_last_obs, eval_last_done, eval_hstate, eval_rng = runner_state
@@ -427,32 +446,24 @@ def make_train(config):
             if config.get("DEBUG_TRACE", False):
                 jax.debug.callback(lambda r: print(f"[SEPARATED] Eval end RNG: {r}"), eval_runner_state[-1])
 
-            # Calculate MER (Mean Episodic Return) using common safe_mean function
-            train_mer = safe_mean(traj_batch.info)
+            # Calculate eval MER (Mean Episodic Return) and log immediately after evaluation
             eval_mer = safe_mean(eval_traj_batch.info)
-
-            # Count episode done events (episode end = reset_env will be used next step)
-            train_episode_done_count = traj_batch.done.sum()
             eval_episode_done_count = eval_traj_batch.done.sum()
 
-            def callback(train_mer, eval_mer, train_done, eval_done):
-                nonlocal max_train_mer, max_eval_mer
+            def eval_callback(eval_mer, eval_done):
+                nonlocal max_eval_mer
 
-                # Update MMER (Max Mean Episodic Return) values
-                max_train_mer = max(max_train_mer, float(train_mer))
+                # Update MMER (Max Mean Episodic Return) for evaluation
                 max_eval_mer = max(max_eval_mer, float(eval_mer))
 
-                logger.info(f"Train MER: {train_mer}, Eval MER: {eval_mer}")
-                logger.info(f"Train episode done: {train_done}, Eval episode done: {eval_done}")
+                logger.info(f"Eval MER: {eval_mer:.6g}, MMER: {max_eval_mer:.6g}, Episodes done: {eval_done}")
                 wandb.log({
-                    "train/mer": train_mer,
-                    "train/mmer": max_train_mer,
-                    "train/episode_done_count": train_done,
                     "eval/mer": eval_mer,
                     "eval/mmer": max_eval_mer,
                     "eval/episode_done_count": eval_done,
                 })
-            jax.debug.callback(callback, train_mer, eval_mer, train_episode_done_count, eval_episode_done_count)
+
+            jax.debug.callback(eval_callback, eval_mer, eval_episode_done_count)
 
             # Create metrics dictionary
             metrics_dict = {

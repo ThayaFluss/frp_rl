@@ -344,7 +344,7 @@ def make_train(config):
                 # Update MMER (Max Mean Episodic Return) for training
                 max_train_mer = max(max_train_mer, float(train_mer))
 
-                logger.info(f"Train MER: {train_mer:.6g}, MMER: {max_train_mer:.6g}, Episodes done: {train_done}")
+                logger.info(f"Train MER: {train_mer:.6g}, MMER: {max_train_mer:.6g}, #Ep: {train_done}")
                 wandb.log({
                     "train/mer": train_mer,
                     "train/mmer": max_train_mer,
@@ -456,7 +456,7 @@ def make_train(config):
                 # Update MMER (Max Mean Episodic Return) for evaluation
                 max_eval_mer = max(max_eval_mer, float(eval_mer))
 
-                logger.info(f"Eval MER: {eval_mer:.6g}, MMER: {max_eval_mer:.6g}, Episodes done: {eval_done}")
+                logger.info(f"Eval  MER: {eval_mer:.6g}, MMER: {max_eval_mer:.6g}, #Ep: {eval_done}")
                 wandb.log({
                     "eval/mer": eval_mer,
                     "eval/mmer": max_eval_mer,

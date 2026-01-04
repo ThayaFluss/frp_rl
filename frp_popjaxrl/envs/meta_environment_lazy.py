@@ -11,6 +11,18 @@ from frp.orthogonal_lazy import (
 )
 from flax.core import freeze
 
+# IMPORTANT: Gymnax Auto-Reset Behavior (Lazy Mode)
+# This environment inherits from gymnax.Environment, which provides automatic
+# reset functionality when done=True. See docs/dev/GYMNAX_AUTO_RESET_MECHANISM.md
+# for detailed documentation on how this affects env_index resampling behavior.
+#
+# Key points:
+# - env.step() automatically calls reset_env() when done=True
+# - reset_env() samples a NEW env_index on each call
+# - Therefore, env_index is resampled at meta-episode boundaries via gymnax auto-reset
+# - Tests must use env.step() NOT env.step_env() to observe this behavior
+# - Lazy mode uses on-demand word building (obs_word) instead of storing all words
+
 @struct.dataclass
 class MetaEnvStateLazy:
     """
@@ -246,127 +258,14 @@ class MetaEnvironmentLazy(environment.Environment):
 
 def create_gymnax_environment(env_name: str, env_kwargs: Dict[str, Any], meta_kwargs: Dict[str, Any], norm_kwargs: Dict[str, Any] = None):
     """Create a gymnax environment wrapped in MetaEnvironmentLazy."""
-    try:
-        from gymnax import make as gymnax_make
-        from .wrappers import GymnaxRewardNormWrapper
-
-        # Format the environment name to match gymnax's expected format
-        if env_name.lower() == "cartpole":
-            env_name = "CartPole-v1"
-        elif env_name.lower() == "pendulum":
-            env_name = "Pendulum-v1"
-        elif env_name.lower() == "acrobot":
-            env_name = "Acrobot-v1"
-        elif env_name.lower() == "mountaincar":
-            env_name = "MountainCar-v0"
-        elif env_name.lower() == "mountaincarcontinuous":
-            env_name = "MountainCarContinuous-v0"
-        elif "-" not in env_name and not any(suffix in env_name.lower() for suffix in ["minatar", "bsuite", "misc"]):
-            if env_name.lower() in ["asterix", "breakout", "freeway", "seaquest", "spaceinvaders"]:
-                env_name = f"{env_name.capitalize()}-MinAtar"
-            elif env_name.lower() in ["catch", "deepsea", "memorychain", "umbrellachain",
-                                     "discountingchain", "mnistbandit", "simplebandit"]:
-                env_name = f"{env_name.capitalize()}-bsuite"
-            elif env_name.lower() in ["fourrooms", "metamaze", "pointrobot", "bernoullibandit",
-                                     "gaussianbandit", "reacher", "swimmer", "pong"]:
-                env_name = f"{env_name.capitalize()}-misc"
-
-        # Get the base environment
-        env, _ = gymnax_make(env_name)
-
-        # Create a wrapper class that applies reward normalization
-        class NormalizedEnv(GymnaxRewardNormWrapper):
-            def __init__(self, **kwargs):
-                if norm_kwargs is not None:
-                    strategy = norm_kwargs.get('strategy', 'dynamic')
-                    max_steps = norm_kwargs.get('max_steps', 200)
-                else:
-                    strategy = 'dynamic'
-                    max_steps = 200
-                super().__init__(env.__class__(**kwargs), strategy=strategy, max_steps=max_steps)
-
-        # Return the meta environment with the normalized env
-        return MetaEnvironmentLazy(NormalizedEnv, env_kwargs, meta_kwargs)
-    except Exception as e:
-        raise ValueError(f"Error creating gymnax environment {env_name}: {e}")
+    from .meta_environment_factory import create_gymnax_environment_internal
+    return create_gymnax_environment_internal(env_name, env_kwargs, meta_kwargs, norm_kwargs, MetaEnvironmentLazy)
 
 
 def create_meta_environment(env_name: str, env_kwargs: Dict[str, Any], meta_kwargs: Dict[str, Any], norm_kwargs: Dict[str, Any] = None):
-    """
-    Create a meta environment (lazy evaluation version).
+    """Create a meta environment (lazy evaluation version).
 
     This is the dispatcher function that routes to the appropriate environment class.
     """
-    # Handle popgym environments
-    if env_name == "cartpole":
-        from .environments.popgym_cartpole import NoisyStatelessCartPole
-        return MetaEnvironmentLazy(NoisyStatelessCartPole, env_kwargs, meta_kwargs)
-    if env_name == "cartpole_origin":
-        # Note: cartpole_origin uses different base class, not compatible with lazy version
-        raise NotImplementedError("cartpole_origin is not compatible with lazy evaluation")
-    if env_name == "s_cartpole_hard":
-        from .environments.popgym_cartpole import StatelessCartPoleHard
-        return MetaEnvironmentLazy(StatelessCartPoleHard, env_kwargs, meta_kwargs)
-    if env_name == "ns_cartpole_hard":
-        from .environments.popgym_cartpole import NoisyStatelessCartPoleHard
-        return MetaEnvironmentLazy(NoisyStatelessCartPoleHard, env_kwargs, meta_kwargs)
-    elif env_name == "minesweeper":
-        from .environments.popgym_minesweeper import MineSweeper
-        return MetaEnvironmentLazy(MineSweeper, env_kwargs, meta_kwargs)
-    elif env_name == "minesweeper_hard":
-        from .environments.popgym_minesweeper import MineSweeperHard
-        return MetaEnvironmentLazy(MineSweeperHard, env_kwargs, meta_kwargs)
-    elif env_name == "multiarmedbandit":
-        from .environments.popgym_multiarmedbandit import MultiarmedBandit
-        return MetaEnvironmentLazy(MultiarmedBandit, env_kwargs, meta_kwargs)
-    elif env_name == "higherlower":
-        from .environments.popgym_higherlower import HigherLower
-        return MetaEnvironmentLazy(HigherLower, env_kwargs, meta_kwargs)
-    elif env_name == "higherlower_easy":
-        from .environments.popgym_higherlower import HigherLowerEasy
-        return MetaEnvironmentLazy(HigherLowerEasy, env_kwargs, meta_kwargs)
-    elif env_name == "higherlower_medium":
-        from .environments.popgym_higherlower import HigherLowerMedium
-        return MetaEnvironmentLazy(HigherLowerMedium, env_kwargs, meta_kwargs)
-    elif env_name == "higherlower_hard":
-        from .environments.popgym_higherlower import HigherLowerHard
-        return MetaEnvironmentLazy(HigherLowerHard, env_kwargs, meta_kwargs)
-    elif env_name == "pendulum":
-        from .environments.popgym_pendulum import NoisyStatelessPendulum
-        return MetaEnvironmentLazy(NoisyStatelessPendulum, env_kwargs, meta_kwargs)
-    elif env_name == "pendulum_easy":
-        from .environments.popgym_pendulum import NoisyStatelessPendulumEasy
-        return MetaEnvironmentLazy(NoisyStatelessPendulumEasy, env_kwargs, meta_kwargs)
-    elif env_name == "pendulum_medium":
-        from .environments.popgym_pendulum import NoisyStatelessPendulumMedium
-        return MetaEnvironmentLazy(NoisyStatelessPendulumMedium, env_kwargs, meta_kwargs)
-    elif env_name == "pendulum_hard":
-        from .environments.popgym_pendulum import NoisyStatelessPendulumHard
-        return MetaEnvironmentLazy(NoisyStatelessPendulumHard, env_kwargs, meta_kwargs)
-    elif env_name == "autoencode":
-        from .environments.popgym_autoencode import Autoencode
-        return MetaEnvironmentLazy(Autoencode, env_kwargs, meta_kwargs)
-    elif env_name == "battleship":
-        from .environments.popgym_battleship import Battleship
-        return MetaEnvironmentLazy(Battleship, env_kwargs, meta_kwargs)
-    elif env_name == "concentration":
-        from .environments.popgym_concentration import Concentration
-        return MetaEnvironmentLazy(Concentration, env_kwargs, meta_kwargs)
-    elif env_name == "count_recall":
-        from .environments.popgym_count_recall import CountRecall
-        return MetaEnvironmentLazy(CountRecall, env_kwargs, meta_kwargs)
-    elif env_name == "repeat_first":
-        from .environments.popgym_repeat_first import RepeatFirst
-        return MetaEnvironmentLazy(RepeatFirst, env_kwargs, meta_kwargs)
-    elif env_name == "repeat_first_hard":
-        from .environments.popgym_repeat_first import RepeatFirstHard
-        return MetaEnvironmentLazy(RepeatFirstHard, env_kwargs, meta_kwargs)
-    elif env_name == "repeat_previous_hard":
-        from .environments.popgym_repeat_previous import RepeatPreviousHard
-        return MetaEnvironmentLazy(RepeatPreviousHard, env_kwargs, meta_kwargs)
-    # Check if it's a gymnax environment
-    elif env_name.startswith("gymnax_"):
-        base_env_name = env_name[7:]
-        return create_gymnax_environment(base_env_name, env_kwargs, meta_kwargs, norm_kwargs)
-    else:
-        raise ValueError(f"Unknown environment: {env_name}")
+    from .meta_environment_factory import create_meta_environment_internal
+    return create_meta_environment_internal(env_name, env_kwargs, meta_kwargs, norm_kwargs, MetaEnvironmentLazy)

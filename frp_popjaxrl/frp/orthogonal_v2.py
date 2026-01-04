@@ -68,11 +68,11 @@ def create_words(matrices, depth, in_size=2, out_size=64, max_depth=None, num_ba
     """
     Create result matrices by composing base matrices.
 
-    変数の対応:
-        - depth = L: 掛け算の層数、語の長さ
-        - num_base = B: base matrixの数
-        - num_result_matrices = N: 最終的にできる行列の数
-        - max_depth = L_0: 後方互換性のための変数
+    Variable mapping:
+        - depth = L: Number of composition layers, word length
+        - num_base = B: Number of base matrices
+        - num_result_matrices = N: Number of final result matrices
+        - max_depth = L_0: Variable for backward compatibility
 
     Args:
         matrices: Base matrices (B matrices)

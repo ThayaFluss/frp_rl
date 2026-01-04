@@ -241,6 +241,7 @@ def make_train(config):
             rng, _rng = jax.random.split(rng)
             # Reset eval env before collecting trajectly
             reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
+            # env.reset  is defined by gymnax.environments.environment
             eval_partial_reset = lambda x: env.reset(x, eval_env_params)
             eval_obsv, eval_env_state = jax.vmap(eval_partial_reset)(reset_rng)
             eval_last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)

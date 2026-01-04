@@ -221,8 +221,8 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             "compile_s5_time": compile_s5_time,
             "run_s5_time": run_s5_time,
             "total_s5_time": total_s5_time,
-            "train_metrics": metrics["train_metric"],
-            "eval_metrics": metrics["eval_metric"],
+            "train_mer": metrics["train_mer"],
+            "eval_mer": metrics["eval_mer"],
         }
 
         if "few_shot_metric" in metrics:
@@ -283,8 +283,8 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             "compile_rnn_time": compile_rnn_time,
             "run_rnn_time": run_rnn_time,
             "total_rnn_time": total_rnn_time,
-            "train_metrics": metrics["train_metric"],
-            "eval_metrics": metrics["eval_metric"],
+            "train_mer": metrics["train_mer"],
+            "eval_mer": metrics["eval_mer"],
         }
 
         if "few_shot_metric" in metrics:
@@ -335,15 +335,15 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         # Calculate number of updates
         num_updates = int(config["TOTAL_TIMESTEPS"] // (config["NUM_STEPS"] * config["NUM_ENVS"]))
 
-        # Get the final eval metric
+        # Get the final eval MER (Mean Episodic Return)
         # Handle both array and scalar cases (fallback for safety)
-        eval_metric = metrics["eval_metric"]
+        eval_mer = metrics["eval_mer"]
         try:
             # Try to get the last element if it's an array
-            current_eval_metric = float(eval_metric[-1])
+            current_eval_mer = float(eval_mer[-1])
         except (TypeError, IndexError):
             # If it's already a scalar, use it directly
-            current_eval_metric = float(eval_metric)
+            current_eval_mer = float(eval_mer)
 
         # Save checkpoint
         save_checkpoint(
@@ -354,25 +354,25 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             env_kwargs=env_kwargs,
             meta_kwargs=filtered_meta_kwargs,
             norm_kwargs=norm_kwargs,
-            eval_metric=current_eval_metric,
+            eval_metric=current_eval_mer,
             num_updates=num_updates,
             exp_dir=exp_dir
         )
 
         # Extract metrics for run_info.yaml
-        train_metric_final = float(metrics.get("train_metric", 0.0))
-        eval_metric_final = float(metrics.get("eval_metric", 0.0))
-        train_metric_max = float(metrics.get("max_train_metric", train_metric_final))
-        eval_metric_max = float(metrics.get("max_eval_metric", eval_metric_final))
+        train_mer_final = float(metrics.get("train_mer", 0.0))
+        eval_mer_final = float(metrics.get("eval_mer", 0.0))
+        train_mmer = float(metrics.get("max_train_mer", train_mer_final))
+        eval_mmer = float(metrics.get("max_eval_mer", eval_mer_final))
 
         # Save run info (wandb run ID and metrics) to YAML
         save_run_info(
             exp_dir=exp_dir,
             wandb_run_id=wandb_run_id,
-            train_metric_final=train_metric_final,
-            train_metric_max=train_metric_max,
-            eval_metric_final=eval_metric_final,
-            eval_metric_max=eval_metric_max
+            train_metric_final=train_mer_final,
+            train_metric_max=train_mmer,
+            eval_metric_final=eval_mer_final,
+            eval_metric_max=eval_mmer
         )
 
 

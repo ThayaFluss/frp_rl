@@ -461,6 +461,12 @@ if __name__ == "__main__":
     parser.add_argument("--s5_do_gtrxl_norm", type=int, default=0,
                         help="S5 GTrXL normalization: 0 or 1 (default: %(default)s)")
 
+    ### For FRP input configuration
+    parser.add_argument("--frp_include_metadata", type=int, default=0,
+                        help="Include metadata (action, done, reset) in FRP input: 0 or 1 (default: %(default)s)")
+    parser.add_argument("--frp_include_wrapper", type=int, default=0,
+                        help="Include wrapper data (AliasPrevActionV2) in FRP input: 0 or 1 (default: %(default)s)")
+
     args = parser.parse_args()
 
     # Meta environment specific kwargs
@@ -470,6 +476,8 @@ if __name__ == "__main__":
         "meta_dim": args.dim,
         "meta_with_adjoint": (args.with_adjoint == 1),
         "num_trials_per_episode": args.num_trials,
+        "frp_include_metadata": (args.frp_include_metadata == 1),
+        "frp_include_wrapper": (args.frp_include_wrapper == 1),
     }
 
     # Environment specific kwargs

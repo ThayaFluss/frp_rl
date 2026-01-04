@@ -131,25 +131,49 @@ def make_train(config):
             env_index = frp_manager.sample_env_index(frp_words, index_key)
 
             # Observation structure (from MetaEnvironment + wrappers):
-            # [raw_obs (input_dim)] + [MetaEnv metadata (3)] + [AliasPrevActionV2 (n+1)]
+            # [raw_obs (input_dim)] + [MetaEnv metadata (3)] + [AliasPrevActionV2 (wrapper_dim)]
+            #
+            # FRP transformation strategy depends on include_metadata and include_wrapper:
+            # - include_metadata=False, include_wrapper=False: Transform only raw_obs
+            # - include_metadata=True,  include_wrapper=False: Transform raw_obs + metadata
+            # - include_metadata=True,  include_wrapper=True:  Transform raw_obs + metadata + wrapper
             #
             # After FRP transformation:
-            # [transformed_obs (aug_output_dim)] + [MetaEnv metadata (3)] + [AliasPrevActionV2 (n+1)]
-            #
-            # We need to:
-            # 1. Extract raw_obs[:input_dim]
-            # 2. Apply FRP transform → transformed_obs (aug_output_dim)
-            # 3. Keep rest of observation unchanged (metadata + wrapper data)
-            input_dim = frp_manager.input_dim
+            # [transformed_obs (aug_output_dim)] + [remaining untransformed parts]
 
-            raw_obs = obs[:input_dim]  # Original observation from environment
-            rest = obs[input_dim:]  # Everything after raw obs (metadata + wrapper data)
+            input_dim = frp_manager.input_dim
+            metadata_dim = frp_manager.metadata_dim
+            wrapper_dim = frp_manager.wrapper_dim
+
+            # Split observation into components
+            raw_obs = obs[:input_dim]
+            metadata = obs[input_dim:input_dim + metadata_dim]
+            wrapper = obs[input_dim + metadata_dim:]
+
+            # Build FRP input based on configuration
+            frp_input_parts = [raw_obs]
+            if frp_manager.include_metadata:
+                frp_input_parts.append(metadata)
+            if frp_manager.include_wrapper:
+                frp_input_parts.append(wrapper)
+
+            frp_input = jnp.concatenate(frp_input_parts)
 
             # Apply FRP transformation
-            transformed_obs = frp_manager.transform_obs(raw_obs, env_index, frp_words)
+            transformed_obs = frp_manager.transform_obs(frp_input, env_index, frp_words)
 
-            # Reconstruct: [transformed_obs (aug_output_dim)] + [rest]
-            new_obs = jnp.concatenate([transformed_obs, rest])
+            # Build remaining parts (not transformed)
+            remaining_parts = []
+            if not frp_manager.include_metadata:
+                remaining_parts.append(metadata)
+            if not frp_manager.include_wrapper:
+                remaining_parts.append(wrapper)
+
+            # Reconstruct observation
+            if remaining_parts:
+                new_obs = jnp.concatenate([transformed_obs] + remaining_parts)
+            else:
+                new_obs = transformed_obs
 
             return env_index, new_obs
 
@@ -245,15 +269,38 @@ def make_train(config):
                 # Apply FRP transformation to observations
                 def apply_frp_transform(obs, env_idx):
                     input_dim = frp_manager.input_dim
+                    metadata_dim = frp_manager.metadata_dim
+                    wrapper_dim = frp_manager.wrapper_dim
 
-                    raw_obs = obs[:input_dim]  # Original observation from environment
-                    rest = obs[input_dim:]  # Everything after raw obs (metadata + wrapper data)
+                    # Split observation into components
+                    raw_obs = obs[:input_dim]
+                    metadata = obs[input_dim:input_dim + metadata_dim]
+                    wrapper = obs[input_dim + metadata_dim:]
+
+                    # Build FRP input based on configuration
+                    frp_input_parts = [raw_obs]
+                    if frp_manager.include_metadata:
+                        frp_input_parts.append(metadata)
+                    if frp_manager.include_wrapper:
+                        frp_input_parts.append(wrapper)
+
+                    frp_input = jnp.concatenate(frp_input_parts)
 
                     # Apply FRP transformation using env_index
-                    transformed_obs = frp_manager.transform_obs(raw_obs, env_idx, frp_state.frp_words)
+                    transformed_obs = frp_manager.transform_obs(frp_input, env_idx, frp_state.frp_words)
+
+                    # Build remaining parts (not transformed)
+                    remaining_parts = []
+                    if not frp_manager.include_metadata:
+                        remaining_parts.append(metadata)
+                    if not frp_manager.include_wrapper:
+                        remaining_parts.append(wrapper)
 
                     # Reconstruct full observation
-                    return jnp.concatenate([transformed_obs, rest])
+                    if remaining_parts:
+                        return jnp.concatenate([transformed_obs] + remaining_parts)
+                    else:
+                        return transformed_obs
 
                 obsv = jax.vmap(apply_frp_transform)(obsv, env_indices)
 
@@ -393,19 +440,42 @@ def make_train(config):
                 # Apply evaluation FRP transformation
                 def apply_eval_frp_transform(obs):
                     input_dim = frp_manager.input_dim
+                    metadata_dim = frp_manager.metadata_dim
+                    wrapper_dim = frp_manager.wrapper_dim
 
-                    raw_obs = obs[:input_dim]  # Original observation from environment
-                    rest = obs[input_dim:]  # Everything after raw obs (metadata + wrapper data)
+                    # Split observation into components
+                    raw_obs = obs[:input_dim]
+                    metadata = obs[input_dim:input_dim + metadata_dim]
+                    wrapper = obs[input_dim + metadata_dim:]
+
+                    # Build FRP input based on configuration
+                    frp_input_parts = [raw_obs]
+                    if frp_manager.include_metadata:
+                        frp_input_parts.append(metadata)
+                    if frp_manager.include_wrapper:
+                        frp_input_parts.append(wrapper)
+
+                    frp_input = jnp.concatenate(frp_input_parts)
 
                     # Apply evaluation FRP transformation
                     if eval_frp_manager is not None:
-                        transformed_obs = eval_frp_manager.transform_obs(raw_obs)
+                        transformed_obs = eval_frp_manager.transform_obs(frp_input)
                     else:
-                        # If no eval manager, use raw observation as-is
-                        transformed_obs = raw_obs
+                        # If no eval manager, use frp_input as-is
+                        transformed_obs = frp_input
+
+                    # Build remaining parts (not transformed)
+                    remaining_parts = []
+                    if not frp_manager.include_metadata:
+                        remaining_parts.append(metadata)
+                    if not frp_manager.include_wrapper:
+                        remaining_parts.append(wrapper)
 
                     # Reconstruct full observation
-                    return jnp.concatenate([transformed_obs, rest])
+                    if remaining_parts:
+                        return jnp.concatenate([transformed_obs] + remaining_parts)
+                    else:
+                        return transformed_obs
 
                 eval_obsv = jax.vmap(apply_eval_frp_transform)(eval_obsv)
 
@@ -434,17 +504,41 @@ def make_train(config):
             # Apply evaluation FRP transformation to initial observations
             def apply_eval_frp_transform_init(obs):
                 input_dim = frp_manager.input_dim
+                metadata_dim = frp_manager.metadata_dim
+                wrapper_dim = frp_manager.wrapper_dim
 
-                raw_obs = obs[:input_dim]  # Original observation from environment
-                rest = obs[input_dim:]  # Everything after raw obs (metadata + wrapper data)
+                # Split observation into components
+                raw_obs = obs[:input_dim]
+                metadata = obs[input_dim:input_dim + metadata_dim]
+                wrapper = obs[input_dim + metadata_dim:]
+
+                # Build FRP input based on configuration
+                frp_input_parts = [raw_obs]
+                if frp_manager.include_metadata:
+                    frp_input_parts.append(metadata)
+                if frp_manager.include_wrapper:
+                    frp_input_parts.append(wrapper)
+
+                frp_input = jnp.concatenate(frp_input_parts)
 
                 if eval_frp_manager is not None:
-                    transformed_obs = eval_frp_manager.transform_obs(raw_obs)
+                    transformed_obs = eval_frp_manager.transform_obs(frp_input)
                 else:
-                    # If no eval manager, use raw observation as-is
-                    transformed_obs = raw_obs
+                    # If no eval manager, use frp_input as-is
+                    transformed_obs = frp_input
 
-                return jnp.concatenate([transformed_obs, rest])
+                # Build remaining parts (not transformed)
+                remaining_parts = []
+                if not frp_manager.include_metadata:
+                    remaining_parts.append(metadata)
+                if not frp_manager.include_wrapper:
+                    remaining_parts.append(wrapper)
+
+                # Reconstruct full observation
+                if remaining_parts:
+                    return jnp.concatenate([transformed_obs] + remaining_parts)
+                else:
+                    return transformed_obs
 
             eval_obsv = jax.vmap(apply_eval_frp_transform_init)(eval_obsv)
 

@@ -343,7 +343,7 @@ def make_train(config):
             train_mer = safe_mean(traj_batch.info)
             train_num_done_epsodes = traj_batch.done.sum()
 
-            def train_callback(train_mer, train_done, total_loss, value_loss, actor_loss, entropy, step):
+            def train_env_callback(train_mer, train_done, step):
                 nonlocal max_train_mer
 
                 # Update MMER (Max Mean Episodic Return) for training
@@ -351,19 +351,25 @@ def make_train(config):
 
                 logger.info(f"[Step {int(step)}]")
                 logger.info(f"Train MER: {train_mer:.6f}, MMER: {max_train_mer:.6f}, #Done: {train_done}")
-                logger.info(f"Loss : {total_loss:.6f}, V: {value_loss:.6f}, A: {actor_loss:.6f}, E: {entropy:.6f}")
                 wandb.log({
                     "train/env/mer": train_mer,
                     "train/env/mmer": max_train_mer,
                     "train/env/num_done_epsodes": train_done,
+                }, step=int(step))
+
+            def train_loss_callback(total_loss, value_loss, actor_loss, entropy, step):
+                logger.info(f"Total Loss: {total_loss:.6f}")
+                logger.info(f"Val: {value_loss:.6f}, Act: {actor_loss:.6f}, Ent: {entropy:.6f}")
+
+                wandb.log({
                     "train/loss/total": total_loss,
                     "train/loss/value": value_loss,
                     "train/loss/actor": actor_loss,
                     "train/loss/entropy": entropy,
                 }, step=int(step))
 
-            jax.debug.callback(train_callback, train_mer, train_num_done_epsodes,
-                               total_loss, value_loss, actor_loss, entropy, update_idx)
+            jax.debug.callback(train_env_callback, train_mer, train_num_done_epsodes, update_idx)
+            jax.debug.callback(train_loss_callback, total_loss, value_loss, actor_loss, entropy, update_idx)
 
             # EVALUATION (side-effect only, doesn't affect training state)
             def _eval_env_step(runner_state, unused):

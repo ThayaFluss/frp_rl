@@ -328,6 +328,11 @@ def make_train(config):
             train_state = update_state[0]
             rng = update_state[-1]
 
+            # Extract loss metrics (average across all epochs and minibatches)
+            total_loss, (value_loss, actor_loss, entropy) = jax.tree_util.tree_map(
+                lambda x: x.mean(), loss_info
+            )
+
             # Update frp_state with final env_indices from trajectory collection
             frp_state = frp_state.replace(env_indices=final_env_indices)
 
@@ -336,9 +341,9 @@ def make_train(config):
 
             # Calculate train MER (Mean Episodic Return) and log immediately after training
             train_mer = safe_mean(traj_batch.info)
-            train_episode_done_count = traj_batch.done.sum()
+            train_num_done_epsodes = traj_batch.done.sum()
 
-            def train_callback(train_mer, train_done, step):
+            def train_callback(train_mer, train_done, total_loss, value_loss, actor_loss, entropy, step):
                 nonlocal max_train_mer
 
                 # Update MMER (Max Mean Episodic Return) for training
@@ -346,13 +351,19 @@ def make_train(config):
 
                 logger.info(f"[Step {int(step)}]")
                 logger.info(f"Train MER: {train_mer:.6f}, MMER: {max_train_mer:.6f}, #Done: {train_done}")
+                logger.info(f"Loss : {total_loss:.6f}, V: {value_loss:.6f}, A: {actor_loss:.6f}, E: {entropy:.6f}")
                 wandb.log({
-                    "train/mer": train_mer,
-                    "train/mmer": max_train_mer,
-                    "train/episode_done_count": train_done,
+                    "train/env/mer": train_mer,
+                    "train/env/mmer": max_train_mer,
+                    "train/env/num_done_epsodes": train_done,
+                    "train/loss/total": total_loss,
+                    "train/loss/value": value_loss,
+                    "train/loss/actor": actor_loss,
+                    "train/loss/entropy": entropy,
                 }, step=int(step))
 
-            jax.debug.callback(train_callback, train_mer, train_episode_done_count, update_idx)
+            jax.debug.callback(train_callback, train_mer, train_num_done_epsodes,
+                               total_loss, value_loss, actor_loss, entropy, update_idx)
 
             # EVALUATION (side-effect only, doesn't affect training state)
             def _eval_env_step(runner_state, unused):
@@ -449,7 +460,7 @@ def make_train(config):
 
             # Calculate eval MER (Mean Episodic Return) and log immediately after evaluation
             eval_mer = safe_mean(eval_traj_batch.info)
-            eval_episode_done_count = eval_traj_batch.done.sum()
+            eval_num_done_epsodes = eval_traj_batch.done.sum()
 
             def eval_callback(eval_mer, eval_done, step):
                 nonlocal max_eval_mer
@@ -459,19 +470,19 @@ def make_train(config):
 
                 logger.info(f"Eval  MER: {eval_mer:.6f}, MMER: {max_eval_mer:.6f}, #Done: {eval_done}")
                 wandb.log({
-                    "eval/mer": eval_mer,
-                    "eval/mmer": max_eval_mer,
-                    "eval/episode_done_count": eval_done,
+                    "eval/env/mer": eval_mer,
+                    "eval/env/mmer": max_eval_mer,
+                    "eval/env/num_done_epsodes": eval_done,
                 }, step=int(step))
 
-            jax.debug.callback(eval_callback, eval_mer, eval_episode_done_count, update_idx)
+            jax.debug.callback(eval_callback, eval_mer, eval_num_done_epsodes, update_idx)
 
             # Create metrics dictionary
             metrics_dict = {
                 "train_mer": train_mer,
                 "eval_mer": eval_mer,
-                "train_episode_done_count": train_episode_done_count,
-                "eval_episode_done_count": eval_episode_done_count,
+                "train_num_done_epsodes": train_num_done_epsodes,
+                "eval_num_done_epsodes": eval_num_done_epsodes,
             }
 
             # DEBUG: Track RNG state at end of update

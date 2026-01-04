@@ -13,7 +13,6 @@ the environment. Key features:
 For legacy/lazy modes (FRP integrated into environment), use ppo_in_context_legacy.py
 """
 import logging
-from typing import NamedTuple, Dict
 
 import jax
 import jax.numpy as jnp
@@ -25,9 +24,6 @@ from gymnax.environments import spaces
 
 from envs.wrappers import LogWrapper
 from frp.frp_manager import (
-    FRPManager,
-    EvalFRPManager,
-    FRPWords,
     FRPState,
     create_frp_manager,
     create_eval_frp_manager,
@@ -77,13 +73,12 @@ def make_train(config):
     frp_transformed_obs_size = frp_manager.aug_output_dim + metadata_and_wrapper_size
 
     init_x = (jnp.zeros((1, config["NUM_ENVS"], frp_transformed_obs_size)),
-                jnp.zeros((1, config["NUM_ENVS"])))
+              jnp.zeros((1, config["NUM_ENVS"])))
 
     def train(rng):
         # Initialize max metric tracking
         max_train_metric = float('-inf')
         max_eval_metric = float('-inf')
-
 
         # INIT NETWORK PARAMETERS
         rng, _rng = jax.random.split(rng)
@@ -193,15 +188,17 @@ def make_train(config):
 
                 # DEBUG: Trace action
                 if config.get("DEBUG_TRACE", False):
-                    jax.debug.callback(lambda a, d, e: print(f"[SEPARATED] action={a}, last_done={d}, env_indices={e}"),
-                                     action, last_done, env_indices)
+                    jax.debug.callback(
+                        lambda a, d, e: print(f"[SEPARATED] action={a}, last_done={d}, env_indices={e}"),
+                        action, last_done, env_indices
+                    )
 
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
                 rng_step = jax.random.split(_rng, config["NUM_ENVS"])
-                obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0,None))(
-                    rng_step, env_state, action, env_params
-                )
+                obsv, env_state, reward, done, info = jax.vmap(
+                    env.step, in_axes=(0, 0, 0, None)
+                )(rng_step, env_state, action, env_params)
 
                 # Resample env_indices for environments that are done (meta episode ended)
                 # IMPORTANT: To match RNG consumption with legacy mode, we derive resample RNG
@@ -240,8 +237,10 @@ def make_train(config):
 
                 # DEBUG: Trace done, reward, and env_indices after resample
                 if config.get("DEBUG_TRACE", False):
-                    jax.debug.callback(lambda d, r, e: print(f"[SEPARATED] done={d}, reward={r}, new_env_indices={e}"),
-                                     done, reward, env_indices)
+                    jax.debug.callback(
+                        lambda d, r, e: print(f"[SEPARATED] done={d}, reward={r}, new_env_indices={e}"),
+                        done, reward, env_indices
+                    )
 
                 # Apply FRP transformation to observations
                 def apply_frp_transform(obs, env_idx):
@@ -282,7 +281,8 @@ def make_train(config):
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
                 def _update_minbatch(train_state, batch_info):
-                    init_hstate, traj_batch,  advantages, targets = batch_info
+                    init_hstate, traj_batch, advantages, targets = batch_info
+
                     def _loss_fn(params, init_hstate, traj_batch, gae, targets):
                         # RERUN NETWORK
                         _, pi, value = network.apply(params, init_hstate, (traj_batch.obs, traj_batch.done))
@@ -326,7 +326,6 @@ def make_train(config):
             update_state = (train_state, initial_hstate, traj_batch, advantages, targets, rng)
             update_state, loss_info = jax.lax.scan(_update_epoch, update_state, None, config["UPDATE_EPOCHS"])
             train_state = update_state[0]
-            metric = traj_batch.info
             rng = update_state[-1]
 
             # Update frp_state with final env_indices from trajectory collection
@@ -350,9 +349,9 @@ def make_train(config):
                 # STEP EVAL ENV (completely independent from training env)
                 eval_rng, _eval_rng = jax.random.split(eval_rng)
                 eval_rng_step = jax.random.split(_eval_rng, config["NUM_ENVS"])
-                eval_obsv, eval_env_state, reward, done, info = jax.vmap(eval_env.step, in_axes=(0,0,0,None))(
-                    eval_rng_step, eval_env_state, action, eval_env_params
-                )
+                eval_obsv, eval_env_state, reward, done, info = jax.vmap(
+                    eval_env.step, in_axes=(0, 0, 0, None)
+                )(eval_rng_step, eval_env_state, action, eval_env_params)
 
                 # Apply evaluation FRP transformation
                 def apply_eval_frp_transform(obs):
@@ -388,8 +387,11 @@ def make_train(config):
 
             # Reset eval env before collecting trajectory
             reset_rng = jax.random.split(eval_rng, config["NUM_ENVS"])
-            # env.reset  is defined by gymnax.environments.environment
-            eval_partial_reset = lambda x: env.reset(x, eval_env_params)
+
+            # env.reset is defined by gymnax.environments.environment
+            def eval_partial_reset(x):
+                return env.reset(x, eval_env_params)
+
             eval_obsv, eval_env_state = jax.vmap(eval_partial_reset)(reset_rng)
 
             # Apply evaluation FRP transformation to initial observations
@@ -443,12 +445,12 @@ def make_train(config):
                 logger.info(f"Train metric: {train_metric}, Eval metric: {eval_metric}")
                 logger.info(f"Train episode done: {train_done}, Eval episode done: {eval_done}")
                 wandb.log({
-                        "train/metric": train_metric,
-                        "train/max_metric": max_train_metric,
-                        "train/episode_done_count": train_done,
-                        "eval/metric": eval_metric,
-                        "eval/max_metric": max_eval_metric,
-                        "eval/episode_done_count": eval_done,
+                    "train/metric": train_metric,
+                    "train/max_metric": max_train_metric,
+                    "train/episode_done_count": train_done,
+                    "eval/metric": eval_metric,
+                    "eval/max_metric": max_eval_metric,
+                    "eval/episode_done_count": eval_done,
                 })
             jax.debug.callback(callback, train_metric, eval_metric, train_episode_done_count, eval_episode_done_count)
 
@@ -462,16 +464,17 @@ def make_train(config):
 
             # DEBUG: Track RNG state at end of update
             if config.get("DEBUG_TRACE", False):
-                jax.debug.callback(lambda r, e: print(f"[SEPARATED] End-of-update RNG: {r}, env_indices: {e}"),
-                                 rng, final_env_indices)
+                jax.debug.callback(
+                    lambda r, e: print(f"[SEPARATED] End-of-update RNG: {r}, env_indices: {e}"),
+                    rng, final_env_indices
+                )
 
             return next_runner_state, metrics_dict
 
         rng, _rng = jax.random.split(rng)
         last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
 
-        runner_state = (train_state, env_state, obsv, last_done, init_hstate, _rng,
-                       frp_state)
+        runner_state = (train_state, env_state, obsv, last_done, init_hstate, _rng, frp_state)
         runner_state, metrics = jax.lax.scan(_update_step, runner_state, None, config["NUM_UPDATES"])
 
         # Get the final metrics from the last update
@@ -482,8 +485,9 @@ def make_train(config):
         final_metrics["max_eval_metric"] = max_eval_metric
 
         return runner_state, final_metrics
-    
+
     return train
+
 
 if __name__ == "__main__":
     config = {

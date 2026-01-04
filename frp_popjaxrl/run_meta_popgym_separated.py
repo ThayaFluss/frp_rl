@@ -55,9 +55,9 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
     else:  # >= 2
         logger.info("JAX profiling: COMPILE_LOG + PROFILER")
 
-    logger.info("="*50)
+    logger.info("=" * 50)
     logger.info("Running in mode: SEPARATED")
-    logger.info("="*50)
+    logger.info("=" * 50)
 
     # Setup training RNG
     train_seed = args.seed
@@ -99,7 +99,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
     eval_env = create_meta_environment(env_name, eval_env_kwargs, eval_meta_kwargs, eval_norm_kwargs)
     eval_env_params = eval_env.default_params
 
-    if args.debug==1:
+    if args.debug == 1:
         config = {
         "MODEL_TYPE": arch,  # 'gru' or 's5'
         "LR": 2.5e-4,
@@ -107,7 +107,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "NUM_STEPS": 16,
         "TOTAL_TIMESTEPS": 1e3,
         "UPDATE_EPOCHS": 2,
-        "NUM_MINIBATCHES":2,
+        "NUM_MINIBATCHES": 2,
         "GAMMA": 0.99,
         "GAE_LAMBDA": 1.0,
         "CLIP_EPS": 0.2,
@@ -132,7 +132,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "S5_DO_NORM": False,
         "S5_PRENORM": False,
         "S5_DO_GTRXL_NORM": False,
-        "RESET_WORDS": (args.reset_words==1),
+        "RESET_WORDS": (args.reset_words == 1),
         }
     else:
         config = {
@@ -156,7 +156,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "META_KWARGS": meta_kwargs,
         "EVAL_META_KWARGS": eval_meta_kwargs,
         "EVAL_SEED": eval_seed,
-        "ANNEAL_LR": (args.anneal_lr==1),
+        "ANNEAL_LR": (args.anneal_lr == 1),
         "DEBUG": True,
         "DEBUG_TRACE": (args.debug >= 2),
         "S5_D_MODEL": 256,
@@ -164,10 +164,10 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "S5_N_LAYERS": args.s5_n_layers,
         "S5_BLOCKS": 1,
         "S5_ACTIVATION": "full_glu",
-        "S5_DO_NORM": (args.s5_do_norm==1),
-        "S5_PRENORM": (args.s5_prenorm==1),
-        "S5_DO_GTRXL_NORM": (args.s5_do_gtrxl_norm==1),
-        "RESET_WORDS": (args.reset_words==1)
+        "S5_DO_NORM": (args.s5_do_norm == 1),
+        "S5_PRENORM": (args.s5_prenorm == 1),
+        "S5_DO_GTRXL_NORM": (args.s5_do_gtrxl_norm == 1),
+        "RESET_WORDS": (args.reset_words == 1)
         }
 
     rngs = jax.random.split(train_rng, num_runs)
@@ -203,12 +203,12 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         total_s5_time = compile_s5_time + run_s5_time
 
         # Display summary
-        logger.info("="*50)
+        logger.info("=" * 50)
         logger.info("S5 Training Summary:")
         logger.info(f"  Compile time:  {compile_s5_time:>8.2f}s")
         logger.info(f"  Training time: {run_s5_time:>8.2f}s")
         logger.info(f"  Total time:    {total_s5_time:>8.2f}s")
-        logger.info("="*50)
+        logger.info("=" * 50)
 
         # Keep arrays as arrays, only convert scalars
         metrics = jax.tree_util.tree_map(
@@ -222,7 +222,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             "run_s5_time": run_s5_time,
             "total_s5_time": total_s5_time,
             "train_metrics": metrics["train_metric"],
-            "in_context_metrics": metrics["in_context_metric"],
+            "eval_metrics": metrics["eval_metric"],
         }
 
         if "few_shot_metric" in metrics:
@@ -265,12 +265,12 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         total_rnn_time = compile_rnn_time + run_rnn_time
 
         # Display summary
-        logger.info("="*50)
+        logger.info("=" * 50)
         logger.info("GRU Training Summary:")
         logger.info(f"  Compile time:  {compile_rnn_time:>8.2f}s")
         logger.info(f"  Training time: {run_rnn_time:>8.2f}s")
         logger.info(f"  Total time:    {total_rnn_time:>8.2f}s")
-        logger.info("="*50)
+        logger.info("=" * 50)
 
         # Keep arrays as arrays, only convert scalars
         metrics = jax.tree_util.tree_map(
@@ -284,7 +284,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             "run_rnn_time": run_rnn_time,
             "total_rnn_time": total_rnn_time,
             "train_metrics": metrics["train_metric"],
-            "in_context_metrics": metrics["in_context_metric"],
+            "eval_metrics": metrics["eval_metric"],
         }
 
         if "few_shot_metric" in metrics:
@@ -335,15 +335,15 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         # Calculate number of updates
         num_updates = int(config["TOTAL_TIMESTEPS"] // (config["NUM_STEPS"] * config["NUM_ENVS"]))
 
-        # Get the final eval metric (in_context_metric)
+        # Get the final eval metric
         # Handle both array and scalar cases (fallback for safety)
-        in_context_metric = metrics["in_context_metric"]
+        eval_metric = metrics["eval_metric"]
         try:
             # Try to get the last element if it's an array
-            current_eval_metric = float(in_context_metric[-1])
+            current_eval_metric = float(eval_metric[-1])
         except (TypeError, IndexError):
             # If it's already a scalar, use it directly
-            current_eval_metric = float(in_context_metric)
+            current_eval_metric = float(eval_metric)
 
         # Save checkpoint
         save_checkpoint(
@@ -361,7 +361,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
 
         # Extract metrics for run_info.yaml
         train_metric_final = float(metrics.get("train_metric", 0.0))
-        eval_metric_final = float(metrics.get("in_context_metric", 0.0))
+        eval_metric_final = float(metrics.get("eval_metric", 0.0))
         train_metric_max = float(metrics.get("max_train_metric", train_metric_final))
         eval_metric_max = float(metrics.get("max_eval_metric", eval_metric_final))
 
@@ -468,7 +468,7 @@ if __name__ == "__main__":
         "meta_depth": args.depth,
         "meta_max_depth": args.max_depth,
         "meta_dim": args.dim,
-        "meta_with_adjoint": (args.with_adjoint==1),
+        "meta_with_adjoint": (args.with_adjoint == 1),
         "num_trials_per_episode": args.num_trials,
     }
 

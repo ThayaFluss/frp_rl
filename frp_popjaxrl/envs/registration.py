@@ -40,9 +40,34 @@ from .environments import (
     RepeatPreviousMedium,
     RepeatPreviousHard,
 )
-from .meta_environment import create_meta_environment
+from .meta_environment_separated import create_meta_environment
 
 def make(env_id: str, **kwargs):
+    """Create and register an environment by ID.
+
+    This function provides a unified interface for creating all types of environments:
+    - Meta-wrapped environments (MetaGymnax*, Meta*)
+    - Direct gymnax environments (Gymnax*)
+    - Special meta environments (NoisyStatelessMetaCartPole)
+    - Standard popgym environments
+
+    Special Environments:
+        NoisyStatelessMetaCartPole (cartpole_origin): This is a complete meta-environment
+        that uses a learnable MetaAugNetwork instead of FRP transformations. It cannot be
+        wrapped with MetaEnvironment and should only be accessed via registration.py.
+
+    Args:
+        env_id: Environment identifier string
+        **kwargs: Environment-specific keyword arguments (env_kwargs + meta_kwargs)
+
+    Returns:
+        Tuple of (environment, default_params)
+
+    Examples:
+        >>> env, params = make("MetaCartPole", meta_dim=64, meta_depth=2)
+        >>> env, params = make("NoisyStatelessMetaCartPole", meta_dim=4)
+        >>> env, params = make("GymnaxCartPole-v1")
+    """
     # Case 1: Meta environment with gymnax base (MetaGymnax*)
     if env_id.startswith("MetaGymnax"):
         # [Duplicated]

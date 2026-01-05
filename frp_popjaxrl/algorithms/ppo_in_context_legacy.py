@@ -1,158 +1,62 @@
+"""
+Unified PPO training with in-context learning (eager word creation).
+
+This module supports both GRU and S5 encoders via the MODEL_TYPE configuration parameter.
+Words are created eagerly at initialization and optionally reset each epoch.
+"""
+import logging
+from typing import NamedTuple, Dict
+
 import jax
 import jax.numpy as jnp
-import flax.linen as nn
 import numpy as np
 import optax
-import time
-from flax.linen.initializers import constant, orthogonal
-from typing import Sequence, NamedTuple, Any, Dict
-from flax.training.train_state import TrainState
-import distrax
-from envs.wrappers import LogWrapper
-from gymnax.environments import spaces
-from .s5 import init_S5SSM, make_DPLR_HiPPO, StackedEncoderModel
 import wandb
-from frp.orthogonal import create_words, create_orthogonal_matrices
-#from flax.core import freeze
+from flax.training.train_state import TrainState
+from gymnax.environments import spaces
 
-class ActorCriticS5(nn.Module):
-    action_dim: Sequence[int]
-    config: Dict
-    ssm_init_fn: Any
+from envs.wrappers import LogWrapper
+from frp.orthogonal_legacy import create_words, create_orthogonal_matrices
 
-    def setup(self):
-        self.encoder_0 = nn.Dense(128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))
-        self.encoder_1 = nn.Dense(256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))
-    
-        self.action_body_0 = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))
-        self.action_body_1 = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))
-        self.action_decoder = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))
+from .ppo_common import (
+    Transition,
+    make_linear_schedule,
+    calculate_gae,
+    safe_mean,
+    create_minibatches,
+    setup_config,
+    create_network,
+)
 
-        self.value_body_0 = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))
-        self.value_body_1 = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))
-        self.value_decoder = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))
+logger = logging.getLogger(__name__)
 
-        self.s5 = StackedEncoderModel(
-            ssm=self.ssm_init_fn,
-            d_model=self.config["S5_D_MODEL"],
-            n_layers=self.config["S5_N_LAYERS"],
-            activation=self.config["S5_ACTIVATION"],
-            do_norm=self.config["S5_DO_NORM"],
-            prenorm=self.config["S5_PRENORM"],
-            do_gtrxl_norm=self.config["S5_DO_GTRXL_NORM"],
-        )
-        if self.config["CONTINUOUS"]:
-            self.log_std = self.param('log_std', nn.initializers.zeros, (self.action_dim,))
-
-    def __call__(self, hidden, x):
-        obs, dones = x
-        if self.config.get("NO_RESET"):
-            dones = jnp.zeros_like(dones)
-        embedding = self.encoder_0(obs)
-        embedding = nn.leaky_relu(embedding)
-        embedding = self.encoder_1(embedding)
-        embedding = nn.leaky_relu(embedding)
-
-        hidden, embedding = self.s5(hidden, embedding, dones)
-
-        actor_mean = self.action_body_0(embedding)
-        actor_mean = nn.leaky_relu(actor_mean)
-        actor_mean = self.action_body_1(actor_mean)
-        actor_mean = nn.leaky_relu(actor_mean)
-        actor_mean = self.action_decoder(actor_mean)
-
-        if self.config["CONTINUOUS"]:
-            pi = distrax.MultivariateNormalDiag(actor_mean, jnp.exp(self.log_std))
-        else:
-            pi = distrax.Categorical(logits=actor_mean)
-
-        critic = self.value_body_0(embedding)
-        critic = nn.leaky_relu(critic)
-        critic = self.value_body_1(critic)
-        critic = nn.leaky_relu(critic)
-        critic = self.value_decoder(critic)
-
-        return hidden, pi, jnp.squeeze(critic, axis=-1)
-
-class Transition(NamedTuple):
-    done: jnp.ndarray
-    action: jnp.ndarray
-    value: jnp.ndarray
-    reward: jnp.ndarray
-    log_prob: jnp.ndarray
-    obs: jnp.ndarray
-    info: jnp.ndarray
-
-def symlog(x):
-    return jnp.sign(x) * jnp.log(jnp.abs(x) + 1)
 
 def make_train(config):
-    
-    config["NUM_UPDATES"] = (
-        config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
-    )
-    config["MINIBATCH_SIZE"] = (
-        config["NUM_ENVS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
-    )
+    config = setup_config(config)
+
     env, env_params = config["ENV"], config["ENV_PARAMS"]
     env = LogWrapper(env)
 
     eval_env, eval_env_params = config["EVAL_ENV"], config["EVAL_ENV_PARAMS"]
     eval_env = LogWrapper(eval_env)
 
-    config["CONTINUOUS"] = type(env.action_space(env_params)) == spaces.Box 
+    config["CONTINUOUS"] = type(env.action_space(env_params)) == spaces.Box
 
-    d_model = config["S5_D_MODEL"]
-    ssm_size = config["S5_SSM_SIZE"]
-    n_layers = config["S5_N_LAYERS"]
-    blocks = config["S5_BLOCKS"]
-    block_size = int(ssm_size / blocks)
+    linear_schedule = make_linear_schedule(config)
 
-    Lambda, _, _, V,  _ = make_DPLR_HiPPO(ssm_size)
-    block_size = block_size // 2
-    ssm_size = ssm_size // 2
-    Lambda = Lambda[:block_size]
-    V = V[:, :block_size]
-    Vinv = V.conj().T
-
-    ssm_init_fn = init_S5SSM(H=d_model,
-                                P=ssm_size,
-                                Lambda_re_init=Lambda.real,
-                                Lambda_im_init=Lambda.imag,
-                                V=V,
-                                Vinv=Vinv,
-                                C_init="lecun_normal",
-                                discretization="zoh",
-                                dt_min=0.001,
-                                dt_max=0.1,
-                                conj_sym=True,
-                                clip_eigs=False,
-                                bidirectional=False)
-
-    def linear_schedule(count):
-        frac = 1.0 - (count // (config["NUM_MINIBATCHES"] * config["UPDATE_EPOCHS"])) / config["NUM_UPDATES"]
-        return config["LR"] * frac
-
+    # Create network with encoder type from config (defaults to 'gru')
+    model_type = config.get("MODEL_TYPE", "gru").lower()
+    network = create_network(model_type, env.action_space(env_params), config)
 
     def train(rng):
         # Initialize max metric tracking
         max_train_metric = float('-inf')
         max_eval_metric = float('-inf')
 
-        # INIT NETWORK
-        if config["CONTINUOUS"]:
-            network = ActorCriticS5(env.action_space(env_params).shape[0], config=config, ssm_init_fn=ssm_init_fn)
-        else:
-            network = ActorCriticS5(env.action_space(env_params).n, config=config, ssm_init_fn=ssm_init_fn)
+        # INIT NETWORK PARAMETERS
         rng, _rng = jax.random.split(rng)
-        
-        # Debug prints to understand dimensions
-        obs_shape = env.observation_space(env_params).shape
-        print(f"Observation space shape: {obs_shape}")
-        
-        init_x = (jnp.zeros((1, config["NUM_ENVS"], *obs_shape)), jnp.zeros((1, config["NUM_ENVS"])))
-        
-        init_hstate = StackedEncoderModel.initialize_carry(config["NUM_ENVS"], ssm_size, n_layers)
+        init_x = (jnp.zeros((1, config["NUM_ENVS"], *env.observation_space(env_params).shape)), jnp.zeros((1, config["NUM_ENVS"])))
+        init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
         network_params = network.init(_rng, init_hstate, init_x)
         if config["ANNEAL_LR"]:
             tx = optax.chain(
@@ -170,12 +74,15 @@ def make_train(config):
         # INIT ENV
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
-        partial_reset = lambda x: env.reset(x, env_params)
-        obsv, env_state = jax.vmap(partial_reset)(reset_rng)
+        # env.reset  is defined by gymnax.environments.environment
+        obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
+        init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
 
-        # INIT network
-        init_hstate = StackedEncoderModel.initialize_carry(config["NUM_ENVS"], ssm_size, n_layers)
-
+        # INIT EVAL ENV
+        rng, _rng = jax.random.split(rng)
+        reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
+        eval_obsv, eval_env_state = jax.vmap(eval_env.reset, in_axes=(0, None))(reset_rng, eval_env_params)
+        eval_init_hstate = network.initialize_core_hidden_state(config["NUM_ENVS"])
 
         # Add function to create words that will be called periodically
         def _create_words(key):
@@ -193,7 +100,7 @@ def make_train(config):
                 max_depth=config["ENV"].meta_max_depth
             )
             input_dim = config["ENV"].obs_shape[0]
-             # For identity eval method, we need to ensure the output of words match the observation dimension
+            # For identity eval method, we need to ensure the output of words match the observation dimension
             if hasattr(config["EVAL_ENV"], "meta_const_aug") and config["EVAL_ENV"].meta_const_aug == "identity":
                 # For identity, we need to ensure the output dimension matches the input dimension
                 # We'll slice the words to match the input dimension for both input and output
@@ -202,13 +109,17 @@ def make_train(config):
                 # For other evaluation methods, keep the original behavior
                 # (truncate input dimension but keep output dimension as meta_dim)
                 return words[:, :input_dim, :]
+
         # Create initial words for both training and eval
         rng, _rng = jax.random.split(rng)
         train_words = _create_words(_rng)
 
         # Set the words in environments
         env.words = train_words
-        
+
+        # Note: Cannot log env_indices here as they are inside JIT-compiled env_state
+        # Legacy mode stores env_index in MetaEnvState, sampled during env.reset()
+
         # TRAIN LOOP
         def _update_step(runner_state, unused):
             # Unpack state including words
@@ -225,54 +136,58 @@ def make_train(config):
                     env_state.env_state.replace(
                         obs_words=words)
 
-            # minumal runner state for inner loop
-            runner_state = (train_state, env_state, obsv, last_done, hstate, rng)
             # COLLECT TRAJECTORIES
             def _env_step(runner_state, unused):
                 train_state, env_state, last_obs, last_done, hstate, rng = runner_state
+
+                # DEBUG_TRACE: Trace RNG at start of step
+                if config.get("DEBUG_TRACE", False):
+                    jax.debug.callback(lambda r: print(f"[LEGACY] Step start RNG: {r}"), rng)
+
                 rng, _rng = jax.random.split(rng)
 
-                
-                # Check if we need to slice the observation
+                # SELECT ACTION
                 ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
-                
                 hstate, pi, value = network.apply(train_state.params, hstate, ac_in)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
                 value, action, log_prob = value.squeeze(0), action.squeeze(0), log_prob.squeeze(0)
 
+                # DEBUG: Trace action
+                if config.get("DEBUG_TRACE", False):
+                    jax.debug.callback(lambda a, d: print(f"[LEGACY] action={a}, last_done={d}"), action, last_done)
+
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
                 rng_step = jax.random.split(_rng, config["NUM_ENVS"])
-                # parallel, but it shares env_params
                 obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0,None))(
                     rng_step, env_state, action, env_params
                 )
+
+                # DEBUG: Trace done and reward
+                if config.get("DEBUG_TRACE", False):
+                    jax.debug.callback(lambda d, r: print(f"[LEGACY] done={d}, reward={r}"), done, reward)
+
                 transition = Transition(last_done, action, value, reward, log_prob, last_obs, info)
                 runner_state = (train_state, env_state, obsv, done, hstate, rng)
                 return runner_state, transition
 
-            initial_hstate = runner_state[-2]
-            # traj_batch: num_steps x num_envs x state_dim
-            runner_state, traj_batch = jax.lax.scan(_env_step, runner_state, None, config["NUM_STEPS"])
+            # Minimal runner state for inner loop
+            runner_state_inner = (train_state, env_state, obsv, last_done, hstate, rng)
+            initial_hstate = runner_state_inner[-2]  # hstate is at index 4
+            runner_state_inner, traj_batch = jax.lax.scan(_env_step, runner_state_inner, None, config["NUM_STEPS"])
 
             # CALCULATE ADVANTAGE
-            train_state, env_state, last_obs, last_done, hstate, rng = runner_state
-            
+            train_state, env_state, last_obs, last_done, hstate, rng = runner_state_inner
             ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
-                
             _, _, last_val = network.apply(train_state.params, hstate, ac_in)
             last_val = last_val.squeeze(0)
-            def _calculate_gae(traj_batch, last_val, last_done):
-                def _get_advantages(carry, transition):
-                    gae, next_value, next_done = carry
-                    done, value, reward = transition.done, transition.value, transition.reward 
-                    delta = reward + config["GAMMA"] * next_value * (1 - next_done) - value
-                    gae = delta + config["GAMMA"] * config["GAE_LAMBDA"] * (1 - next_done) * gae
-                    return (gae, value, done), gae
-                _, advantages = jax.lax.scan(_get_advantages, (jnp.zeros_like(last_val), last_val, last_done), traj_batch, reverse=True, unroll=16)
-                return advantages, advantages + traj_batch.value
-            advantages, targets = _calculate_gae(traj_batch, last_val, last_done)
+
+            # Calculate advantages using common GAE function
+            advantages, targets = calculate_gae(
+                traj_batch, last_val, last_done,
+                config["GAMMA"], config["GAE_LAMBDA"]
+            )
 
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
@@ -308,19 +223,10 @@ def make_train(config):
 
                 train_state, init_hstate, traj_batch, advantages, targets, rng = update_state
 
-                rng, _rng = jax.random.split(rng)
-                permutation = jax.random.permutation(_rng, config["NUM_ENVS"])
+                # Create minibatches using common function
                 batch = (init_hstate, traj_batch, advantages, targets)
-
-                shuffled_batch = jax.tree_util.tree_map(
-                    lambda x: jnp.take(x, permutation, axis=1), batch
-                )
-
-                minibatches = jax.tree_util.tree_map(
-                    lambda x: jnp.swapaxes(jnp.reshape(
-                        x, [x.shape[0], config["NUM_MINIBATCHES"], -1] + list(x.shape[2:])
-                    ), 1, 0),
-                    shuffled_batch,
+                minibatches, rng = create_minibatches(
+                    batch, config["NUM_ENVS"], config["NUM_MINIBATCHES"], rng
                 )
 
                 train_state, total_loss = jax.lax.scan(_update_minbatch, train_state, minibatches)
@@ -333,13 +239,13 @@ def make_train(config):
             metric = traj_batch.info
             rng = update_state[-1]
 
+            # EVALUATION
             def _eval_env_step(runner_state, unused):
                 train_state, env_state, last_obs, last_done, hstate, rng = runner_state
                 rng, _rng = jax.random.split(rng)
 
-                
+                # SELECT ACTION
                 ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
-                
                 hstate, pi, value = network.apply(train_state.params, hstate, ac_in)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
@@ -348,55 +254,36 @@ def make_train(config):
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
                 rng_step = jax.random.split(_rng, config["NUM_ENVS"])
-                # parallel, but it shares env_params
-                ### replace env by eval_env
                 obsv, env_state, reward, done, info = jax.vmap(eval_env.step, in_axes=(0,0,0,None))(
-                    rng_step, env_state, action, env_params
+                    rng_step, env_state, action, eval_env_params
                 )
-                
-                # Important: We need to ensure that the observation in the returned runner_state
-                # has the same shape as the input observation to avoid shape mismatch errors in jax.lax.scan
-                # So we'll store the original observation in the transition, but use the sliced observation
-                # in the runner_state if we sliced it
                 transition = Transition(last_done, action, value, reward, log_prob, last_obs, info)
-                
-                # If we sliced the observation, we need to ensure the returned observation has the same shape
-                if last_obs.shape[-1] > 8 and 'sliced_obs' in locals():
-                    # We need to ensure obsv has the same shape as last_obs
-                    # This is a temporary solution - we're padding the sliced observation with zeros
-                    # to match the original shape
-                    if len(obsv.shape) == 2:  # Shape is (1, 70)
-                        padded_obsv = jnp.zeros_like(last_obs)
-                        padded_obsv = padded_obsv.at[:, :8].set(obsv[:, :8])
-                        obsv = padded_obsv
-                    else:  # Shape is (70,)
-                        padded_obsv = jnp.zeros_like(last_obs)
-                        padded_obsv = padded_obsv.at[:8].set(obsv[:8])
-                        obsv = padded_obsv
-                
                 runner_state = (train_state, env_state, obsv, done, hstate, rng)
                 return runner_state, transition
 
-
-            # In-Context evaluation 
+            # In-Context evaluation
             rng, _rng = jax.random.split(rng)
+
+            # DEBUG_TRACE: Trace eval loop start RNG
+            if config.get("DEBUG_TRACE", False):
+                jax.debug.callback(lambda r: print(f"[LEGACY] Eval start RNG: {r}"), _rng)
+
             # Reset eval env before collecting trajectly
             reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
             eval_partial_reset = lambda x: env.reset(x, eval_env_params)
             eval_obsv, eval_env_state = jax.vmap(eval_partial_reset)(reset_rng)
             eval_last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
             eval_hstate=initial_hstate
-            
+
             rng, _rng = jax.random.split(rng)
             eval_runner_state = (train_state, eval_env_state, eval_obsv, eval_last_done, eval_hstate, _rng)
             eval_runner_state, eval_traj_batch = jax.lax.scan(_eval_env_step, eval_runner_state, None, config["NUM_STEPS"])
 
-            def safe_mean(info):
-                returned_episodes = info["returned_episode"].sum()
-                returns_sum = (info["return_info"][...,1]*info["returned_episode"]).sum()
-                return jnp.where(returned_episodes > 0, returns_sum / returned_episodes, 0.0)
-                
+            # DEBUG_TRACE: Trace eval loop end RNG
+            if config.get("DEBUG_TRACE", False):
+                jax.debug.callback(lambda r: print(f"[LEGACY] Eval end RNG: {r}"), eval_runner_state[-1])
 
+            # Calculate metrics using common safe_mean function
             train_metric = safe_mean(traj_batch.info)
             in_context_metric = safe_mean(eval_traj_batch.info)
 
@@ -411,38 +298,46 @@ def make_train(config):
                 max_train_metric = max(max_train_metric, float(train_metric))
                 max_eval_metric = max(max_eval_metric, float(in_context_metric))
 
-                print(f"Train metric: {train_metric}, In-context: {in_context_metric}")
-                print(f"Train episode done: {train_done}, Eval episode done: {eval_done}")
+                logger.info(f"Train metric: {train_metric}, In-context: {in_context_metric}")
+                logger.info(f"Train episode done: {train_done}, Eval episode done: {eval_done}")
                 wandb.log({
-                    "metric": train_metric,
-                    "eval_metric": in_context_metric,
-                    "max_metric": max_train_metric,
-                    "max_eval_metric": max_eval_metric,
-                    "train_episode_done_count": train_done,
-                    "eval_episode_done_count": eval_done,
+                        "metric": train_metric,
+                        "eval_metric": in_context_metric,
+                        "max_metric": max_train_metric,
+                        "max_eval_metric": max_eval_metric,
+                        "train_episode_done_count": train_done,
+                        "eval_episode_done_count": eval_done,
                 })
             jax.debug.callback(callback, train_metric, in_context_metric, train_episode_done_count, eval_episode_done_count)
 
             # Create metrics dictionary
             metrics_dict = {
                 "train_metric": train_metric,
-                "in_context_metric": in_context_metric,
+                "in_context_metric": safe_mean(eval_traj_batch.info),
                 "train_episode_done_count": train_episode_done_count,
                 "eval_episode_done_count": eval_episode_done_count,
             }
 
+            # DEBUG: Track RNG state at end of update
+            if config.get("DEBUG_TRACE", False):
+                jax.debug.callback(lambda r: print(f"[LEGACY] End-of-update RNG: {r}"), rng)
+
             return (train_state, env_state, last_obs, last_done, hstate, rng, words), metrics_dict
-                
+
         rng, _rng = jax.random.split(rng)
         last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
                               
         runner_state = (train_state, env_state, obsv, last_done, init_hstate, _rng, 
                        train_words)
         runner_state, metrics = jax.lax.scan(_update_step, runner_state, None, config["NUM_UPDATES"])
-        
+
         # Get the final metrics from the last update
         final_metrics = jax.tree_util.tree_map(lambda x: x[-1], metrics)
-        
+
+        # Add max values tracked in callback
+        final_metrics["max_train_metric"] = max_train_metric
+        final_metrics["max_eval_metric"] = max_eval_metric
+
         return runner_state, final_metrics
     
     return train
@@ -464,14 +359,6 @@ if __name__ == "__main__":
         "ENV_NAME": "MemoryChain-bsuite",
         "ANNEAL_LR": True,
         "DEBUG": True,
-        "S5_D_MODEL": 256,
-        "S5_SSM_SIZE": 256,
-        "S5_N_LAYERS": 4,
-        "S5_BLOCKS": 1,
-        "S5_ACTIVATION": "full_glu",
-        "S5_DO_NORM": True,
-        "S5_PRENORM": True,
-        "S5_DO_GTRXL_NORM": True,
     }
 
     jit_train = jax.jit(make_train(config))

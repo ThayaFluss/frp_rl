@@ -10,7 +10,7 @@ checkpoints/
 exp/
 tbm*
 */docs/dev/
-
+logs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -472,13 +472,13 @@ class LogWrapper(GymnaxWrapper):
         Returns:
             Tuple[chex.Array, environment.EnvState, float, bool, dict]: _description_
 
-        具体例:
-            エピソード1開始: returned_episode_returns = 0
-            エピソード1進行中: episode_returns が増加、returned_episode_returns は 0 のまま
-            エピソード1完了時（総リターン100とする）: returned_episode_returns = 100
-            エピソード2開始: returned_episode_returns は 100 のまま、episode_returns は 0 にリセット
-            エピソード2進行中: episode_returns が増加、returned_episode_returns は 100 のまま
-            エピソード2完了時（総リターン150とする）: returned_episode_returns = 150        
+        Example:
+            Episode 1 starts: returned_episode_returns = 0
+            Episode 1 in progress: episode_returns increases, returned_episode_returns stays 0
+            Episode 1 completes (total return 100): returned_episode_returns = 100
+            Episode 2 starts: returned_episode_returns stays 100, episode_returns resets to 0
+            Episode 2 in progress: episode_returns increases, returned_episode_returns stays 100
+            Episode 2 completes (total return 150): returned_episode_returns = 150        
             
         """
         obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)

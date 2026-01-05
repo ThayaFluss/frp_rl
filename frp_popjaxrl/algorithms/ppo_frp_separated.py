@@ -62,15 +62,17 @@ def make_train(config):
     frp_manager = create_frp_manager(config)
     eval_frp_manager = create_eval_frp_manager(config)
 
-    # Original: Calculate FRP-transformed observation size explicitly
-    # Original obs from env: input_dim + 3 (MetaEnv metadata)
-    # After FRP transform: aug_output_dim + 3 (MetaEnv metadata)
-    # After AliasPrevActionV2 wrapper: + (n+1) where n=num_actions for Discrete
+    # Calculate FRP-transformed observation size
+    # Original obs from env: input_dim + 3 (metadata) + wrapper_dim
+    # FRP is applied to selected components (raw_obs + optionally metadata/wrapper)
+    # After FRP transform: aug_output_dim (transformed) + remaining (not transformed)
     base_env_obs_size = env.observation_space(env_params).shape[0]
-    # base_env_obs_size = input_dim + 3 + (n+1)
-    # We need to replace input_dim with aug_output_dim
-    metadata_and_wrapper_size = base_env_obs_size - frp_manager.input_dim
-    frp_transformed_obs_size = frp_manager.aug_output_dim + metadata_and_wrapper_size
+    # FRP input dimension (what gets transformed)
+    frp_input_dim = frp_manager.frp_input_dim
+    # Parts that are NOT transformed
+    non_transformed_size = base_env_obs_size - frp_input_dim
+    # Final observation size after FRP transformation
+    frp_transformed_obs_size = frp_manager.aug_output_dim + non_transformed_size
 
     init_x = (jnp.zeros((1, config["NUM_ENVS"], frp_transformed_obs_size)),
               jnp.zeros((1, config["NUM_ENVS"])))

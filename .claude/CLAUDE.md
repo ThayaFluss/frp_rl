@@ -144,6 +144,28 @@ frp_transformed_obs_size = aug_output_dim + non_transformed_size
 
 ---
 
+## Development Environment
+
+### Python Environment Setup
+
+**Package Management:**
+- Use `uv` for dependency management with `pyproject.toml`
+- Virtual environment: `.venv` (managed by `uv`)
+
+**Setup commands:**
+```bash
+# Create and sync environment
+uv sync
+
+# Activate environment
+source .venv/bin/activate
+
+# Install/update dependencies
+uv sync
+```
+
+---
+
 ## Development Guidelines
 
 ### Making Changes to frp_popjaxrl
@@ -151,13 +173,7 @@ frp_transformed_obs_size = aug_output_dim + non_transformed_size
 #### 1. Before Writing Code
 
 **Required Reading:**
-- Check `docs/dev/` for relevant documentation
-  - ⚠️ **Note:** `docs/dev/` contains both current and historical documents
-  - Some documents may be outdated or related to completed work
-  - Always verify document date and relevance before relying on it
-  - Key current docs: `GYMNAX_AUTO_RESET_MECHANISM.md`, recent `*_SUMMARY.md` files
 - Review `GYMNAX_AUTO_RESET_MECHANISM.md` if touching environments
-- Check existing plans in `docs/dev/plan/` (may be historical)
 
 **Investigation First:**
 ```bash
@@ -167,8 +183,6 @@ rg "pattern" frp_popjaxrl/
 # Check dimension usage
 rg "input_dim|obs_size|frp_input_dim" frp_popjaxrl/
 
-# Verify test coverage
-pytest frp_popjaxrl/tests/ -v
 ```
 
 #### 2. Architecture Decisions
@@ -281,6 +295,19 @@ See `.claude/rules/code-style.md` for detailed guidelines.
 - Explicit dimension comments
 - Type hints for all public functions
 
+### Code Quality Checks
+
+**Linting:**
+- Run linters (pylint, flake8) when changes are complete
+- Not required for every small change
+- **Required before PR submission**
+
+```bash
+# Run when your changes are ready
+flake8 frp_popjaxrl/ --max-line-length=120 --ignore=E203,W503
+pylint frp_popjaxrl/
+```
+
 ---
 
 ## Testing Strategy
@@ -380,7 +407,7 @@ JAX_TRACEBACK_FILTERING=off python run_meta_popgym_separated.py ...
 ## Getting Help
 
 **If stuck:**
-1. Check `docs/dev/` for existing documentation
+1. Check `frp_popjaxrl/docs/` for existing documentation
 2. Search codebase: `rg "relevant_term" frp_popjaxrl/`
 3. Read Gymnax auto-reset docs if environment-related
 4. Check git history: `git log --oneline -- <file>`

@@ -75,24 +75,46 @@ class FRPManager:
         input_dim: int,
         meta_max_depth: int,
         meta_with_adjoint: bool,
-        meta_truncate_aug: int
+        meta_truncate_aug: int,
+        include_metadata: bool = False,
+        include_wrapper: bool = False,
+        metadata_dim: int = 3,
+        wrapper_dim: int = 0
     ):
         """Initialize FRP Manager.
 
         Args:
             meta_depth: Depth of word tree (controls granularity)
             meta_dim: Dimension of meta augmentation (output size)
-            input_dim: Dimension of input observations
+            input_dim: Dimension of raw environment observations (before metadata/wrapper)
             meta_max_depth: Maximum depth for parallel words (controls # of words)
             meta_with_adjoint: Whether to include adjoint matrices
             meta_truncate_aug: Whether to truncate augmentation output (0 or 1)
+            include_metadata: Whether to include metadata (3D: action, done, reset) in FRP input
+            include_wrapper: Whether to include wrapper data in FRP input
+            metadata_dim: Dimension of metadata (default: 3)
+            wrapper_dim: Dimension of wrapper data (set at runtime based on action space)
         """
         self.meta_depth = meta_depth
         self.meta_dim = meta_dim
-        self.input_dim = input_dim
+        self.input_dim = input_dim  # Raw environment observation dimension
         self.meta_max_depth = meta_max_depth
         self.meta_with_adjoint = meta_with_adjoint
         self.meta_truncate_aug = meta_truncate_aug
+
+        # FRP input configuration
+        self.include_metadata = include_metadata
+        self.include_wrapper = include_wrapper
+        self.metadata_dim = metadata_dim
+        self.wrapper_dim = wrapper_dim
+
+        # Calculate FRP input dimension based on what's included
+        # Always includes input_dim (raw env obs)
+        self.frp_input_dim = input_dim
+        if include_metadata:
+            self.frp_input_dim += metadata_dim
+        if include_wrapper:
+            self.frp_input_dim += wrapper_dim
 
         # Calculate output dimension based on truncation setting
         if meta_truncate_aug == 1:
@@ -138,10 +160,10 @@ class FRPManager:
         # Truncate words based on configuration
         if self.meta_truncate_aug == 1:
             # Truncate both input and output dimensions
-            words = words[:, :self.input_dim, :self.aug_output_dim]
+            words = words[:, :self.frp_input_dim, :self.aug_output_dim]
         else:
             # Only truncate input dimension, keep full output
-            words = words[:, :self.input_dim, :]
+            words = words[:, :self.frp_input_dim, :]
 
         total_words = words.shape[0]
 
@@ -177,7 +199,8 @@ class FRPManager:
         the input observation. This is the core FRP operation.
 
         Args:
-            obs: Input observation vector [input_dim]
+            obs: Input observation vector [frp_input_dim]
+                 Should contain raw_obs + (metadata if included) + (wrapper if included)
             env_index: Index of the word to use for transformation
             frp_words: FRPWords dataclass with transformation matrices
 
@@ -187,7 +210,7 @@ class FRPManager:
         weight = get_weight_matrix(
             frp_words.words,
             env_index,
-            self.input_dim,
+            self.frp_input_dim,
             self.aug_output_dim
         )
         # Apply transformation: obs @ weight
@@ -209,27 +232,46 @@ class EvalFRPManager:
         >>> transformed_obs = eval_manager.transform_obs(obs)
     """
 
-    def __init__(self, method: str, input_dim: int, output_dim: int):
+    def __init__(self, method: str, input_dim: int, output_dim: int,
+                 include_metadata: bool = False, include_wrapper: bool = False,
+                 metadata_dim: int = 3, wrapper_dim: int = 0):
         """Initialize evaluation FRP manager.
 
         Args:
             method: Evaluation method - "identity", "padding", or "tiling"
-            input_dim: Dimension of input observations
+            input_dim: Dimension of raw input observations
             output_dim: Dimension of output (meta_dim or input_dim)
+            include_metadata: Whether to include metadata in FRP input
+            include_wrapper: Whether to include wrapper data in FRP input
+            metadata_dim: Dimension of metadata (default: 3)
+            wrapper_dim: Dimension of wrapper data
         """
         self.method = method
         self.input_dim = input_dim
         self.output_dim = output_dim
 
+        # FRP input configuration
+        self.include_metadata = include_metadata
+        self.include_wrapper = include_wrapper
+        self.metadata_dim = metadata_dim
+        self.wrapper_dim = wrapper_dim
+
+        # Calculate FRP input dimension
+        self.frp_input_dim = input_dim
+        if include_metadata:
+            self.frp_input_dim += metadata_dim
+        if include_wrapper:
+            self.frp_input_dim += wrapper_dim
+
         # Prepare transformation matrix based on method
         if method == "padding":
-            # Create padding matrix: eye(output_dim)[:input_dim, :]
-            self.eval_weight = jnp.eye(output_dim)[:input_dim, :]
+            # Create padding matrix: eye(output_dim)[:frp_input_dim, :]
+            self.eval_weight = jnp.eye(output_dim)[:self.frp_input_dim, :]
         elif method == "tiling":
             # Create periodic tiling matrix
             from envs.environments.metaaug.padding import create_periodic_weight
             self.eval_weight = create_periodic_weight(
-                input_dim=input_dim,
+                input_dim=self.frp_input_dim,
                 output_dim=output_dim,
                 period=round(output_dim / 2)
             )
@@ -245,10 +287,11 @@ class EvalFRPManager:
         Applies deterministic transformation based on the evaluation method.
 
         Args:
-            obs: Input observation vector [input_dim]
+            obs: Input observation vector [frp_input_dim]
+                 Should contain raw_obs + (metadata if included) + (wrapper if included)
 
         Returns:
-            Transformed observation [output_dim] or [input_dim] for identity
+            Transformed observation [output_dim] or [frp_input_dim] for identity
         """
         if self.method == "identity":
             # No transformation
@@ -283,6 +326,18 @@ def create_frp_manager(config) -> FRPManager:
 
     meta_kwargs = config["META_KWARGS"]
 
+    # Get wrapper configuration
+    wrapper_env = config["ENV"]
+    wrapper_dim = 0
+    if hasattr(wrapper_env, '__class__') and 'AliasPrevActionV2' in wrapper_env.__class__.__name__:
+        # Calculate wrapper dimension based on action space
+        from gymnax.environments import spaces
+        action_space = wrapper_env.action_space(config["ENV_PARAMS"])
+        if isinstance(action_space, spaces.Discrete):
+            wrapper_dim = action_space.n + 1  # one-hot + reset flag
+        elif isinstance(action_space, spaces.Box):
+            wrapper_dim = 2  # action + reset flag
+
     return FRPManager(
         meta_depth=meta_kwargs.get('meta_depth', 1),
         meta_dim=meta_kwargs.get('meta_dim', 4),
@@ -290,6 +345,10 @@ def create_frp_manager(config) -> FRPManager:
         meta_max_depth=meta_kwargs.get('meta_max_depth', 2),
         meta_with_adjoint=meta_kwargs.get('meta_with_adjoint', False),
         meta_truncate_aug=meta_kwargs.get('meta_truncate_aug', 0),
+        include_metadata=meta_kwargs.get('frp_include_metadata', False),
+        include_wrapper=meta_kwargs.get('frp_include_wrapper', False),
+        metadata_dim=3,
+        wrapper_dim=wrapper_dim,
     )
 
 
@@ -329,6 +388,18 @@ def create_eval_frp_manager(config) -> Optional[EvalFRPManager]:
         meta_truncate_aug = meta_kwargs.get('meta_truncate_aug', 0)
         meta_dim = meta_kwargs.get('meta_dim', 4)
 
+        # Get wrapper configuration
+        wrapper_env = config["EVAL_ENV"]
+        wrapper_dim = 0
+        if hasattr(wrapper_env, '__class__') and 'AliasPrevActionV2' in wrapper_env.__class__.__name__:
+            # Calculate wrapper dimension based on action space
+            from gymnax.environments import spaces
+            action_space = wrapper_env.action_space(config["EVAL_ENV_PARAMS"])
+            if isinstance(action_space, spaces.Discrete):
+                wrapper_dim = action_space.n + 1  # one-hot + reset flag
+            elif isinstance(action_space, spaces.Box):
+                wrapper_dim = 2  # action + reset flag
+
         # Determine output dimension based on method and truncation
         if method == "identity":
             output_dim = env.input_dim
@@ -340,7 +411,11 @@ def create_eval_frp_manager(config) -> Optional[EvalFRPManager]:
         return EvalFRPManager(
             method=method,
             input_dim=env.input_dim,
-            output_dim=output_dim
+            output_dim=output_dim,
+            include_metadata=meta_kwargs.get('frp_include_metadata', False),
+            include_wrapper=meta_kwargs.get('frp_include_wrapper', False),
+            metadata_dim=3,
+            wrapper_dim=wrapper_dim,
         )
     else:
         # No eval manager needed (will use training FRP)

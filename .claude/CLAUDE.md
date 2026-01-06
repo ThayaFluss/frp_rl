@@ -200,6 +200,141 @@ pylint frp_popjaxrl/
 
 ---
 
+## Evaluating Trained Models
+
+### Overview
+
+Two evaluation scripts are available depending on the training mode:
+- **run_eval.py** - For legacy/lazy mode checkpoints
+- **run_eval_separated.py** - For separated mode checkpoints
+
+Both scripts:
+- Load saved model checkpoints
+- Evaluate over multiple episodes
+- Track per-trial statistics (returns, steps, success rates)
+- Generate plots (PNG) and data (CSV)
+- Support WandB logging
+
+### Legacy/Lazy Mode Evaluation
+
+Use `run_eval.py` with explicit `--mode` flag:
+
+```bash
+# Legacy mode
+python run_eval.py --checkpoint exp/20260106_190721/model_31_iter.pkl \
+    --mode legacy \
+    --eval_num_trials 32 \
+    --num_episodes 10 \
+    --eval_method tiling
+
+# Lazy mode
+python run_eval.py --checkpoint exp/20260106_190803/model_31_iter.pkl \
+    --mode lazy \
+    --eval_num_trials 32 \
+    --num_episodes 10 \
+    --eval_method padding
+```
+
+**Required arguments:**
+- `--checkpoint`: Path to checkpoint file (.pkl)
+- `--mode`: Implementation mode (`legacy` or `lazy`)
+
+**Optional arguments:**
+- `--eval_num_trials`: Number of trials per episode (default: 16)
+- `--num_episodes`: Number of episodes to evaluate (default: 10)
+- `--eval_method`: Evaluation method - `tiling`, `padding`, or `identity` (default: `tiling`)
+- `--seed`: Random seed for evaluation (default: 0)
+- `--log_wandb`: WandB project name (default: "popgym_eval", empty string disables)
+
+### Separated Mode Evaluation
+
+Use `run_eval_separated.py`:
+
+```bash
+python run_eval_separated.py --checkpoint exp/20260106_122337/model_31_iter.pkl \
+    --eval_num_trials 32 \
+    --num_episodes 10 \
+    --eval_method tiling
+```
+
+**Required arguments:**
+- `--checkpoint`: Path to checkpoint file (.pkl)
+
+**Optional arguments:**
+- `--eval_num_trials`: Number of trials per episode (default: 16)
+- `--num_episodes`: Number of episodes to evaluate (default: 10)
+- `--eval_method`: Evaluation method - `tiling`, `padding`, or `identity` (default: `tiling`)
+- `--seed`: Random seed (default: None, uses checkpoint's eval_seed)
+- `--log_wandb`: WandB project name (default: "popgym_eval_separated", empty string disables)
+
+### Evaluation Methods
+
+Three evaluation methods control how observations are transformed:
+
+- **`tiling`** (recommended): Tiles small observations to fill meta_dim
+  - Best for generalizing to different observation sizes
+  - Repeats observation pattern to match training dimensions
+
+- **`padding`**: Pads observations with zeros
+  - Simpler approach, may affect performance
+  - Adds zeros to match training dimensions
+
+- **`identity`**: Uses identity transformation (no augmentation)
+  - Evaluates without FRP transformation
+  - Useful for ablation studies
+
+### Evaluation Outputs
+
+All evaluation scripts produce:
+
+1. **Console output**: Per-episode and per-trial statistics
+   ```
+   Trial | Mean Return | Std Return | Mean Steps | Std Steps | Success Rate
+   ----------------------------------------------------------------------
+       0 |        0.18 |       0.04 |       35.5 |       7.5 |        0.00%
+       1 |        0.08 |       0.00 |       15.5 |       0.5 |        0.00%
+   ```
+
+2. **PNG plots**: Three subplots showing returns, steps, and success rates across trials with ±1 std bands
+   - Saved as `<checkpoint>_trial_stats_n<trials>.png` (legacy/lazy)
+   - Saved as `<checkpoint>_trial_stats_n<trials>_separated.png` (separated)
+
+3. **CSV data**: Trial-wise statistics for further analysis
+   - Saved as `<checkpoint>_trial_stats_n<trials>.csv` (legacy/lazy)
+   - Saved as `<checkpoint>_trial_stats_n<trials>_separated.csv` (separated)
+
+4. **WandB logs** (optional): Per-trial metrics logged with trial number as x-axis
+
+### Error Handling
+
+**Wrong script for checkpoint mode:**
+```bash
+# This will fail with a helpful error message
+python run_eval.py --checkpoint <separated_checkpoint> --mode legacy
+# Error: Checkpoint appears to be from SEPARATED mode (contains EVAL_SEED).
+# Use run_eval_separated.py instead
+```
+
+### Examples
+
+```bash
+# Quick evaluation (2 trials, 2 episodes) for testing
+python run_eval_separated.py --checkpoint exp/20260106_122337/model_31_iter.pkl \
+    --eval_num_trials 2 --num_episodes 2 --log_wandb ""
+
+# Full evaluation with WandB logging
+python run_eval_separated.py --checkpoint exp/20260106_122337/model_31_iter.pkl \
+    --eval_num_trials 32 --num_episodes 100 --eval_method tiling
+
+# Evaluation with different methods for comparison
+for method in tiling padding identity; do
+    python run_eval_separated.py --checkpoint exp/model.pkl \
+        --eval_method $method --log_wandb ""
+done
+```
+
+---
+
 ## Useful Commands
 
 ```bash

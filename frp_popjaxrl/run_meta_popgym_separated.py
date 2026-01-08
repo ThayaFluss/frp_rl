@@ -360,10 +360,20 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         )
 
         # Extract metrics for run_info.yaml
-        train_mer_final = float(metrics.get("train_mer", 0.0))
-        eval_mer_final = float(metrics.get("eval_mer", 0.0))
-        train_mmer = float(metrics.get("max_train_mer", train_mer_final))
-        eval_mmer = float(metrics.get("max_eval_mer", eval_mer_final))
+        # Handle both array and scalar cases for all metrics
+        def extract_final_value(metric_value):
+            """Extract final value from metric (handles both arrays and scalars)."""
+            try:
+                # Try to get the last element if it's an array
+                return float(metric_value[-1])
+            except (TypeError, IndexError):
+                # If it's already a scalar, use it directly
+                return float(metric_value)
+
+        train_mer_final = extract_final_value(metrics.get("train_mer", 0.0))
+        eval_mer_final = extract_final_value(metrics.get("eval_mer", 0.0))
+        train_mmer = extract_final_value(metrics.get("max_train_mer", train_mer_final))
+        eval_mmer = extract_final_value(metrics.get("max_eval_mer", eval_mer_final))
 
         # Save run info (wandb run ID and metrics) to YAML
         save_run_info(

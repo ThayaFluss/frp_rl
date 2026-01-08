@@ -25,6 +25,45 @@ Key parameters:
 - `--max_depth`: Maximum depth (controls number of matrices in FRP)
 - `--seed`: Random seed for reproducibility
 
+## Evaluating Trained Models
+
+After training, use the appropriate evaluation script based on the training mode:
+
+### For Separated Mode (Recommended)
+
+```bash
+# Evaluate a separated mode checkpoint
+python run_eval_separated.py --checkpoint exp/20260106_122337/model_31_iter.pkl \
+    --eval_num_trials 32 \
+    --num_episodes 10 \
+    --eval_method tiling
+```
+
+### For Legacy/Lazy Modes
+
+```bash
+# Legacy mode evaluation
+python run_eval.py --checkpoint exp/model.pkl --mode legacy \
+    --eval_num_trials 32 --num_episodes 10
+
+# Lazy mode evaluation
+python run_eval.py --checkpoint exp/model.pkl --mode lazy \
+    --eval_num_trials 32 --num_episodes 10
+```
+
+**Evaluation Methods:**
+- `tiling` (recommended): Tiles observations to fill meta_dim
+- `padding`: Pads with zeros
+- `identity`: No FRP transformation (ablation)
+
+**Outputs:**
+- Console statistics per trial
+- PNG plots (returns, steps, success rates)
+- CSV data for analysis
+- Optional WandB logging
+
+See `.claude/CLAUDE.md` for detailed evaluation instructions.
+
 # How `frp/orthogonal.py` is Used in `run_meta_popgym.py`
 
 ## Overview

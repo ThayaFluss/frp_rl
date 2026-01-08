@@ -1,18 +1,20 @@
 """
-Evaluation script for LEGACY and LAZY mode checkpoints.
+Evaluation script for SEPARATED mode checkpoints.
 
-This script evaluates trained models from legacy or lazy modes and tracks per-trial statistics
-(returns, steps, success rates) to analyze in-context learning performance.
+This script evaluates trained models from separated mode where FRP state is managed
+externally from MetaEnvironment. Key features:
+- Independent eval_seed for deterministic evaluation
+- External FRP manager reconstruction
+- Manual observation transformation
 
-For SEPARATED mode checkpoints, use run_eval_separated.py instead.
+For legacy/lazy mode checkpoints, use run_eval.py instead.
 
 Example usage:
-    python run_eval.py --checkpoint=checkpoints/cartpole_gru_seed42.pkl \
-                       --mode=legacy \
-                       --eval_num_trials=32 \
-                       --eval_method=tiling \
-                       --num_episodes=10 \
-                       --log_wandb=popgym_eval
+    python run_eval_separated.py --checkpoint=checkpoints/cartpole_gru_seed42.pkl \
+                                 --eval_num_trials=32 \
+                                 --eval_method=tiling \
+                                 --num_episodes=10 \
+                                 --log_wandb=popgym_eval_separated
 
 Outputs:
     - Console: Per-episode and per-trial statistics (returns, steps, success rates)
@@ -35,47 +37,9 @@ from utils.checkpoint import load_checkpoint
 from algorithms.ppo_common import create_network
 from algorithms.models import GRURepModel, S5RepModel
 from algorithms.s5 import StackedEncoderModel
+from envs.meta_environment_separated import create_meta_environment
 from envs.wrappers import AliasPrevActionV2, LogWrapper
-
-
-def detect_mode_from_checkpoint(metadata):
-    """
-    Detect training mode from checkpoint metadata.
-
-    Args:
-        metadata: Checkpoint metadata dictionary
-
-    Returns:
-        str or None: Detected mode ('separated' if EVAL_SEED present, None otherwise)
-    """
-    config = metadata["config"]
-    # Heuristic: Check for EVAL_SEED (separated mode indicator)
-    if "EVAL_SEED" in config:
-        return "separated"
-    # Cannot determine mode reliably
-    return None
-
-
-def import_mode_specific_modules(mode):
-    """
-    Import environment creation function based on mode.
-
-    Args:
-        mode: Implementation mode ('legacy' or 'lazy')
-
-    Returns:
-        create_meta_environment function for the specified mode
-
-    Raises:
-        ValueError: If mode is invalid
-    """
-    if mode == "lazy":
-        from envs.meta_environment_lazy import create_meta_environment
-    elif mode == "legacy":
-        from envs.meta_environment_legacy import create_meta_environment
-    else:
-        raise ValueError(f"Invalid mode: {mode}. Must be 'legacy' or 'lazy'.")
-    return create_meta_environment
+from frp.frp_manager import FRPManager, create_eval_frp_manager
 
 
 class Transition:
@@ -90,25 +54,88 @@ class Transition:
         self.info = info
 
 
-def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, seed=0, eval_method="tiling", log_wandb=None):
+def reconstruct_frp_manager(metadata, env, env_params):
     """
-    Evaluate a saved model checkpoint (legacy or lazy mode) and track per-trial statistics.
+    Reconstruct FRP manager from checkpoint metadata.
+
+    Args:
+        metadata: Checkpoint metadata dictionary
+        env: Wrapped environment (LogWrapper(AliasPrevActionV2(...)))
+        env_params: Environment parameters
+
+    Returns:
+        FRPManager instance reconstructed from checkpoint config
+    """
+    meta_kwargs = metadata["meta_kwargs"]
+
+    # Get base environment observation dimension by unwrapping
+    # Structure: LogWrapper -> AliasPrevActionV2 -> MetaEnvironment -> base_env
+    base_env = env
+    unwrapped_params = env_params
+
+    # Unwrap LogWrapper
+    if hasattr(base_env, 'env'):
+        base_env = base_env.env
+        if hasattr(unwrapped_params, 'env_params'):
+            unwrapped_params = unwrapped_params.env_params
+
+    # Unwrap AliasPrevActionV2
+    if hasattr(base_env, 'env'):
+        base_env = base_env.env
+        if hasattr(unwrapped_params, 'env_params'):
+            unwrapped_params = unwrapped_params.env_params
+
+    # Unwrap MetaEnvironment
+    if hasattr(base_env, 'env'):
+        base_env = base_env.env
+        if hasattr(unwrapped_params, 'env_params'):
+            unwrapped_params = unwrapped_params.env_params
+
+    base_env_obs_dim = base_env.observation_space(unwrapped_params).shape[0]
+
+    # Get action space dimension for wrapper
+    action_space = env.action_space(env_params)
+    if isinstance(action_space, spaces.Box):
+        action_dim = action_space.shape[0]
+    else:
+        action_dim = action_space.n
+
+    # Create FRP manager with same configuration as training
+    manager = FRPManager(
+        meta_depth=meta_kwargs["meta_depth"],
+        meta_dim=meta_kwargs["meta_dim"],
+        input_dim=base_env_obs_dim,
+        meta_max_depth=meta_kwargs["meta_max_depth"],
+        meta_with_adjoint=meta_kwargs["meta_with_adjoint"],
+        meta_truncate_aug=meta_kwargs.get("meta_truncate_aug", 0),
+        include_metadata=meta_kwargs.get("frp_include_metadata", False),
+        include_wrapper=meta_kwargs.get("frp_include_wrapper", False),
+        metadata_dim=3,
+        wrapper_dim=action_dim
+    )
+
+    return manager
+
+
+def evaluate_model(checkpoint_path, eval_num_trials=16, num_episodes=10, seed=None, eval_method="tiling", log_wandb=None):
+    """
+    Evaluate a saved model checkpoint (separated mode) and track per-trial statistics.
 
     This function:
     1. Loads a trained model from checkpoint
-    2. Validates that checkpoint is compatible with specified mode
-    3. Evaluates it over multiple episodes
-    4. Tracks returns, step counts, and success rates for each trial within episodes
-    5. Computes statistics (mean ± std) across episodes for each trial
-    6. Saves results as plots (PNG) and data (CSV)
-    7. Optionally logs results to wandb
+    2. Reconstructs FRP manager from checkpoint metadata
+    3. Evaluates it over multiple episodes with deterministic eval_seed
+    4. Applies FRP transformations manually after each env.step()
+    5. Tracks returns, step counts, and success rates for each trial within episodes
+    6. Computes statistics (mean ± std) across episodes for each trial
+    7. Saves results as plots (PNG) and data (CSV)
+    8. Optionally logs results to wandb
 
     Args:
         checkpoint_path: Path to checkpoint (.pkl file)
-        mode: Implementation mode ('legacy' or 'lazy')
         eval_num_trials: Number of trials per episode (default: 16)
         num_episodes: Number of episodes to evaluate (default: 10)
-        seed: Random seed for evaluation (default: 0)
+        seed: Random seed for evaluation (default: None, uses checkpoint's eval_seed)
         eval_method: Evaluation method - tiling/padding/identity (default: "tiling")
         log_wandb: Wandb project name for logging (default: None, no logging)
 
@@ -118,49 +145,18 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
             - trial_steps, trial_step_means, trial_step_stds: Trial step count statistics
             - trial_successes, trial_success_rates, trial_success_stds: Trial success statistics
 
-    Raises:
-        ValueError: If checkpoint is from separated mode (should use run_eval_separated.py)
-
     Example:
         results = evaluate_model(
             "checkpoints/cartpole_gru_seed42.pkl",
-            mode="legacy",
             eval_num_trials=32,
             num_episodes=10,
             eval_method="tiling",
-            log_wandb="popgym_eval"
+            log_wandb="popgym_eval_separated"
         )
     """
-    # --- Initialize wandb if requested ---
-    if log_wandb is not None:
-        wandb.init(
-            project=log_wandb,
-            config={
-                "checkpoint_path": checkpoint_path,
-                "mode": mode,
-                "eval_num_trials": eval_num_trials,
-                "num_episodes": num_episodes,
-                "seed": seed,
-                "eval_method": eval_method,
-            }
-        )
-
     # --- Load checkpoint and setup environment ---
     print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint, metadata = load_checkpoint(checkpoint_path)
-
-    # Validate checkpoint mode
-    detected_mode = detect_mode_from_checkpoint(metadata)
-    if detected_mode == "separated":
-        raise ValueError(
-            f"Checkpoint appears to be from SEPARATED mode (contains EVAL_SEED).\n"
-            f"Use run_eval_separated.py instead:\n"
-            f"  python run_eval_separated.py --checkpoint {checkpoint_path}"
-        )
-    print(f"Using mode: {mode}")
-
-    # Import mode-specific create_meta_environment function
-    create_meta_environment = import_mode_specific_modules(mode)
 
     # Extract checkpoint information
     params_dict = checkpoint["params"]
@@ -170,6 +166,11 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
     env_kwargs = metadata["env_kwargs"]
     meta_kwargs = metadata["meta_kwargs"].copy()
     norm_kwargs = metadata["norm_kwargs"]
+
+    # Use checkpoint's eval_seed if not specified
+    if seed is None:
+        seed = config.get("EVAL_SEED", config.get("SEED", 0) + 10000)
+    print(f"Using evaluation seed: {seed}")
 
     # Set num_trials for evaluation
     meta_kwargs["num_trials_per_episode"] = eval_num_trials
@@ -201,6 +202,39 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
     config["ENV_PARAMS"] = env_params
     config["CONTINUOUS"] = isinstance(env.action_space(env_params), spaces.Box)
 
+    # Reconstruct FRP manager from checkpoint
+    print("Reconstructing FRP manager from checkpoint")
+    frp_manager = reconstruct_frp_manager(metadata, env, env_params)
+    print(f"FRP Manager: input_dim={frp_manager.input_dim}, output_dim={frp_manager.aug_output_dim}, "
+          f"include_metadata={frp_manager.include_metadata}, include_wrapper={frp_manager.include_wrapper}")
+
+    # Create evaluation FRP manager based on eval_method
+    eval_meta_kwargs = meta_kwargs.copy()
+    eval_config = {
+        "ENV": env,
+        "EVAL_ENV": env,  # Same env for evaluation
+        "META_KWARGS": meta_kwargs,
+        "EVAL_META_KWARGS": eval_meta_kwargs
+    }
+    eval_frp_manager = create_eval_frp_manager(eval_config)
+    if eval_frp_manager is not None:
+        print(f"Using eval FRP manager with method: {eval_method}")
+    else:
+        print("No eval FRP transformation (using training FRP)")
+
+    # --- Initialize wandb if requested ---
+    if log_wandb is not None:
+        wandb.init(
+            project=log_wandb,
+            config={
+                "checkpoint_path": checkpoint_path,
+                "eval_num_trials": eval_num_trials,
+                "num_episodes": num_episodes,
+                "seed": seed,
+                "eval_method": eval_method,
+            }
+        )
+
     # --- Initialize network (GRU or S5) ---
     print(f"Initializing {arch} network")
     network = create_network(arch, env.action_space(env_params), config)
@@ -214,8 +248,45 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
 
     # --- Load saved model parameters ---
     print("Loading saved parameters")
-    # params_dict has structure {'params': {...}}, so we need to use it directly
     network_params = freeze(params_dict)
+
+    # Define FRP transformation function
+    def apply_frp_transform(obs):
+        """Apply FRP transformation to a single observation."""
+        input_dim = frp_manager.input_dim
+        metadata_dim = frp_manager.metadata_dim
+        wrapper_dim = frp_manager.wrapper_dim
+
+        # Split observation into components
+        raw_obs = obs[:input_dim]
+        metadata = obs[input_dim:input_dim + metadata_dim]
+        wrapper = obs[input_dim + metadata_dim:]
+
+        # Build FRP input based on configuration
+        frp_input_parts = [raw_obs]
+        if frp_manager.include_metadata:
+            frp_input_parts.append(metadata)
+        if frp_manager.include_wrapper:
+            frp_input_parts.append(wrapper)
+
+        frp_input = jnp.concatenate(frp_input_parts)
+
+        # Apply transformation
+        if eval_frp_manager is not None:
+            transformed_obs = eval_frp_manager.transform_obs(frp_input)
+        else:
+            transformed_obs = frp_input
+
+        # Reconstruct observation with remaining parts
+        remaining_parts = []
+        if not frp_manager.include_metadata:
+            remaining_parts.append(metadata)
+        if not frp_manager.include_wrapper:
+            remaining_parts.append(wrapper)
+
+        if remaining_parts:
+            return jnp.concatenate([transformed_obs] + remaining_parts)
+        return transformed_obs
 
     # --- Run evaluation episodes ---
     print(f"\nRunning {num_episodes} evaluation episodes...")
@@ -227,6 +298,7 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
         Evaluate a single episode and return per-trial returns.
 
         Runs one episode and tracks rewards for each trial separately.
+        Applies FRP transformations manually after env.step().
         Returns total episode return, length, and per-trial returns array.
         """
         # Reset environment (with batch size 1)
@@ -237,6 +309,9 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
             return env.reset(x, env_params)
 
         obs, env_state = jax.vmap(partial_reset)(reset_rngs)
+
+        # Apply FRP transformation to initial observation
+        obs = jax.vmap(apply_frp_transform)(obs)
 
         # Initialize hidden state using network's method
         hstate = network.initialize_core_hidden_state(1)
@@ -250,7 +325,7 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
         max_steps = num_trials * 200  # Assume max 200 steps per trial
 
         def step_fn(carry, _):
-            """Single environment step with trial tracking."""
+            """Single environment step with trial tracking and FRP transformation."""
             rng, obs, env_state, hstate, done, episode_return, episode_length = carry
 
             # Select action
@@ -268,6 +343,9 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
                 step_rngs, env_state, action, env_params
             )
 
+            # Apply FRP transformation to new observation
+            obs_new = jax.vmap(apply_frp_transform)(obs_new)
+
             # Get current trial number from environment state
             current_trial_num = env_state_new.env_state.trial_num[0]
 
@@ -281,13 +359,10 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
 
             carry = (rng, obs_new, env_state_new, hstate, done_new, episode_return, episode_length)
             # Return reward and trial_num for post-processing
-            # Note: current_trial_num is AFTER auto-increment, so if env_done=True,
-            # trial_num has already been incremented. We need to use the trial_num
-            # BEFORE the step to correctly attribute the termination reward.
             trial_num_before_step = env_state.env_state.trial_num[0]
             return carry, (reward[0], trial_num_before_step, done[0])
 
-        # Run for maximum steps (this should be enough for the episode to finish)
+        # Run for maximum steps
         carry = (rng, obs, env_state, hstate, done, episode_return, episode_length)
         (rng, obs, env_state, hstate, done, episode_return, episode_length), step_data = jax.lax.scan(
             step_fn, carry, None, max_steps
@@ -297,29 +372,18 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
         rewards, trial_nums, dones = step_data
 
         # Compute trial returns using vectorized operations
-        # For each trial, sum rewards collected during that trial
         def compute_trial_return(trial_idx):
-            # Sum rewards where trial_num equals trial_idx AND not done before this step
-            # We use ~dones to exclude steps after the episode has ended
-            # Note: The termination reward (-1.0) is included because it occurs when done[0]=False
-            # (the step that CAUSES termination). Steps after done[0]=True are excluded.
             mask = (trial_nums == trial_idx) & (~dones)
             return jnp.sum(rewards * mask)
 
         # Compute trial step counts
         def compute_trial_steps(trial_idx):
-            # Count steps where trial_num equals trial_idx AND not done before this step
-            # We use ~dones to exclude steps after the episode has ended
-            # (lax.scan continues for max_steps even after episode ends)
             mask = (trial_nums == trial_idx) & (~dones)
             return jnp.sum(mask)
 
-        # Compute trial success (1.0 if trial completed successfully, 0.0 otherwise)
+        # Compute trial success
         def compute_trial_success(trial_idx):
-            # A trial is successful if its return is close to 1.0 (max possible)
-            # This happens when the agent survives max_steps_in_episode
             trial_return = compute_trial_return(trial_idx)
-            # Success threshold: return >= 0.99 (accounting for numerical precision)
             return jnp.where(trial_return >= 0.99, 1.0, 0.0)
 
         trial_returns = jax.vmap(compute_trial_return)(jnp.arange(num_trials))
@@ -328,9 +392,9 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
 
         return episode_return[0], episode_length[0], trial_returns, trial_steps, trial_successes
 
-    all_trial_returns = []  # Store trial returns for all episodes
-    all_trial_steps = []  # Store trial step counts for all episodes
-    all_trial_successes = []  # Store trial success flags for all episodes
+    all_trial_returns = []
+    all_trial_steps = []
+    all_trial_successes = []
 
     # Evaluate over multiple episodes
     for episode in range(num_episodes):
@@ -346,19 +410,17 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
         print(f"Episode {episode+1}: Return = {episode_return:.2f}, Length = {episode_length}")
 
     # --- Compute statistics across episodes ---
-    all_trial_returns = np.array(all_trial_returns)  # Shape: (num_episodes, num_trials)
-    all_trial_steps = np.array(all_trial_steps)  # Shape: (num_episodes, num_trials)
-    all_trial_successes = np.array(all_trial_successes)  # Shape: (num_episodes, num_trials)
+    all_trial_returns = np.array(all_trial_returns)
+    all_trial_steps = np.array(all_trial_steps)
+    all_trial_successes = np.array(all_trial_successes)
     num_trials = all_trial_returns.shape[1]
 
-    # Calculate mean and std across episodes for each trial
     trial_return_means = np.mean(all_trial_returns, axis=0)
     trial_return_stds = np.std(all_trial_returns, axis=0)
 
     trial_step_means = np.mean(all_trial_steps, axis=0)
     trial_step_stds = np.std(all_trial_steps, axis=0)
 
-    # Success rate: mean of success flags (0 or 1) gives success rate
     trial_success_rates = np.mean(all_trial_successes, axis=0)
     trial_success_stds = np.std(all_trial_successes, axis=0)
 
@@ -382,7 +444,6 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
 
     # --- Log to wandb if requested ---
     if log_wandb is not None:
-        # Log overall statistics
         wandb.log({
             "overall/mean_return": np.mean(episode_returns),
             "overall/std_return": np.std(episode_returns),
@@ -390,7 +451,6 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
             "overall/std_length": np.std(episode_lengths),
         })
 
-        # Log per-trial statistics with trial number as x-axis
         for trial_idx in range(num_trials):
             wandb.log({
                 "trial/mean_return": trial_return_means[trial_idx],
@@ -405,7 +465,6 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
     # --- Generate and save visualization ---
     trial_numbers = np.arange(num_trials)
 
-    # Create a figure with 3 subplots (returns, steps, success rate)
     _, axes = plt.subplots(3, 1, figsize=(12, 12))
 
     # Plot 1: Returns
@@ -444,20 +503,20 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
     axes[2].set_xlabel('Trial Number', fontsize=12)
     axes[2].set_ylabel('Success Rate', fontsize=12)
     axes[2].set_title(f'Success Rate vs Trial Number (N={num_episodes} episodes)', fontsize=14)
-    axes[2].set_ylim([-0.05, 1.05])  # Set y-axis range for success rate
+    axes[2].set_ylim([-0.05, 1.05])
     axes[2].grid(True, alpha=0.3)
     axes[2].legend(fontsize=10)
 
     plt.tight_layout()
 
     # Save plot as PNG
-    plot_filename = checkpoint_path.replace('.pkl', f'_trial_stats_n{num_trials}.png')
+    plot_filename = checkpoint_path.replace('.pkl', f'_trial_stats_n{num_trials}_separated.png')
     plt.savefig(plot_filename, dpi=150)
     print(f"\nPlot saved to: {plot_filename}")
     plt.close()
 
     # --- Save data to CSV ---
-    csv_filename = checkpoint_path.replace('.pkl', f'_trial_stats_n{num_trials}.csv')
+    csv_filename = checkpoint_path.replace('.pkl', f'_trial_stats_n{num_trials}_separated.csv')
     with open(csv_filename, 'w', encoding='utf-8') as f:
         f.write("Trial,Mean_Return,Std_Return,Mean_Steps,Std_Steps,Success_Rate,Success_Std\n")
         for trial_idx in range(num_trials):
@@ -492,22 +551,20 @@ def evaluate_model(checkpoint_path, mode, eval_num_trials=16, num_episodes=10, s
 if __name__ == "__main__":
     # --- Command-line interface ---
     parser = argparse.ArgumentParser(
-        description="Evaluate a saved model checkpoint (legacy or lazy mode)",
-        epilog="Note: For separated mode checkpoints, use run_eval_separated.py instead."
+        description="Evaluate a saved model checkpoint (separated mode)",
+        epilog="Note: For legacy/lazy mode checkpoints, use run_eval.py instead."
     )
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to checkpoint file (e.g., checkpoints/cartpole_gru_seed42.pkl)")
-    parser.add_argument("--mode", type=str, required=True, choices=["legacy", "lazy"],
-                        help="Implementation mode (must be 'legacy' or 'lazy')")
     parser.add_argument("--eval_num_trials", type=int, default=16,
                         help="Number of trials per episode for evaluation (default: %(default)s)")
     parser.add_argument("--eval_method", type=str, default="tiling",
                         help="Evaluation method: tiling / padding / identity (default: %(default)s)")
     parser.add_argument("--num_episodes", type=int, default=10,
                         help="Number of episodes to evaluate (default: %(default)s)")
-    parser.add_argument("--seed", type=int, default=0,
-                        help="Random seed for evaluation (default: %(default)s)")
-    parser.add_argument("--log_wandb", type=str, default="popgym_eval",
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for evaluation (default: None, uses checkpoint's eval_seed)")
+    parser.add_argument("--log_wandb", type=str, default="popgym_eval_separated",
                         help="Wandb project name for logging (default: %(default)s). Set to empty string to disable.")
 
     args = parser.parse_args()
@@ -515,7 +572,6 @@ if __name__ == "__main__":
     # Run evaluation
     results = evaluate_model(
         checkpoint_path=args.checkpoint,
-        mode=args.mode,
         eval_num_trials=args.eval_num_trials,
         num_episodes=args.num_episodes,
         seed=args.seed,

@@ -43,3 +43,5 @@ dev = [
 
 [tool.uv.sources]
 
+[tool.setuptools]
+packages = ["frp_popjaxrl"]

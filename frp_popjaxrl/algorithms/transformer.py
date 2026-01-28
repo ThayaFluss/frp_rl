@@ -5,6 +5,9 @@ This module implements TransformerXL with relative position embeddings
 for use in meta-RL settings, following the GTrXL (Gated Transformer-XL)
 architecture for improved training stability.
 
+Reference implementation:
+    https://github.com/Reytuag/transformerXL_PPO_JAX
+
 Components:
 - PositionalEmbedding: Sinusoidal relative position embeddings
 - RelMultiHeadAttention: Relative position multi-head attention

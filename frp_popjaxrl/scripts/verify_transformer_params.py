@@ -4,6 +4,8 @@ Verify Transformer parameter counts against theoretical calculations.
 
 This script calculates the expected parameter counts based on the architecture
 and compares them to the actual counts from model initialization.
+
+Transformer reference: https://github.com/Reytuag/transformerXL_PPO_JAX
 """
 
 import sys

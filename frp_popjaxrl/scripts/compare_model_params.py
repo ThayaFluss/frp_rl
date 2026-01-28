@@ -4,6 +4,8 @@ Compare parameter counts across GRU, S5, and Transformer architectures.
 
 This script creates models with various configurations and counts their parameters,
 outputting a formatted comparison table.
+
+Transformer reference: https://github.com/Reytuag/transformerXL_PPO_JAX
 """
 
 import sys

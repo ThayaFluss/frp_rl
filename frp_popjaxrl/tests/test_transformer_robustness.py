@@ -25,14 +25,12 @@ import sys
 import os
 
 # Add parent directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from algorithms.transformer import (
-    PositionalEmbedding,
     RelMultiHeadAttention,
     TransformerBlock,
     StackedTransformer,
-    Gating
 )
 from algorithms.models import TransformerRepModel, GRURepModel, ActorCriticDiscrete
 
@@ -74,6 +72,7 @@ def small_config():
 # ============================================================================
 # Numerical Stability Tests
 # ============================================================================
+
 
 class TestNumericalStability:
     """Tests for numerical stability in transformer operations."""
@@ -209,7 +208,7 @@ class TestNumericalStability:
 
         def loss_fn(params):
             _, embedding = model.apply(params, hidden, obs, dones)
-            return jnp.mean(embedding ** 2)
+            return jnp.mean(embedding**2)
 
         grads = jax.grad(loss_fn)(params)
 
@@ -244,7 +243,7 @@ class TestNumericalStability:
         grad_norms = []
 
         def collect_norms(path, leaf):
-            if 'transformer' in jax.tree_util.keystr(path):
+            if "transformer" in jax.tree_util.keystr(path):
                 grad_norms.append(jnp.linalg.norm(leaf.ravel()))
 
         jax.tree_util.tree_map_with_path(collect_norms, grads)
@@ -259,6 +258,7 @@ class TestNumericalStability:
 # ============================================================================
 # Memory Management Tests
 # ============================================================================
+
 
 class TestMemoryManagement:
     """Tests for memory reset and sliding window behavior."""
@@ -280,7 +280,9 @@ class TestMemoryManagement:
         )
 
         # Initialize with non-zero memory
-        memories = [jnp.ones((batch_size, mem_len, d_model)) * 5.0 for _ in range(n_layers)]
+        memories = [
+            jnp.ones((batch_size, mem_len, d_model)) * 5.0 for _ in range(n_layers)
+        ]
         x = jnp.ones((batch_size, seq_len, d_model))
 
         # Done signal for batch 0 only
@@ -298,8 +300,12 @@ class TestMemoryManagement:
 
         # Batch 0 memory should be different between reset and no-reset
         for layer_idx in range(n_layers):
-            mem_diff = jnp.abs(new_mem_reset[layer_idx][0] - new_mem_no_reset[layer_idx][0])
-            assert jnp.sum(mem_diff) > 0.1, f"Layer {layer_idx}: Memory not reset for batch 0"
+            mem_diff = jnp.abs(
+                new_mem_reset[layer_idx][0] - new_mem_no_reset[layer_idx][0]
+            )
+            assert jnp.sum(mem_diff) > 0.1, (
+                f"Layer {layer_idx}: Memory not reset for batch 0"
+            )
 
     def test_memory_reset_preserves_other_batches(self, random_key, transformer_config):
         """Test that done signal only affects the relevant batch element."""
@@ -337,11 +343,12 @@ class TestMemoryManagement:
         for layer_idx in range(n_layers):
             for batch_idx in [1, 2, 3]:
                 diff = jnp.abs(
-                    new_mem_reset[layer_idx][batch_idx] -
-                    new_mem_no_reset[layer_idx][batch_idx]
+                    new_mem_reset[layer_idx][batch_idx]
+                    - new_mem_no_reset[layer_idx][batch_idx]
                 )
-                assert jnp.allclose(diff, 0.0, atol=1e-5), \
+                assert jnp.allclose(diff, 0.0, atol=1e-5), (
                     f"Layer {layer_idx}, Batch {batch_idx}: Memory changed unexpectedly"
+                )
 
     def test_memory_persistence_across_calls(self, random_key, transformer_config):
         """Test that memory persists correctly across multiple forward passes."""
@@ -368,7 +375,9 @@ class TestMemoryManagement:
         # Memory should have changed from initial
         for i in range(len(hidden2)):
             diff_from_zero = jnp.abs(hidden2[i]).sum()
-            assert diff_from_zero > 0.1, f"Layer {i}: Memory appears empty after processing"
+            assert diff_from_zero > 0.1, (
+                f"Layer {i}: Memory appears empty after processing"
+            )
 
     def test_sliding_window_correctness(self, random_key, transformer_config):
         """Test that sliding window memory update works correctly."""
@@ -395,8 +404,9 @@ class TestMemoryManagement:
 
         # New memory should have correct shape
         for i, mem in enumerate(new_memories):
-            assert mem.shape == (batch_size, mem_len, d_model), \
+            assert mem.shape == (batch_size, mem_len, d_model), (
                 f"Layer {i}: Memory shape incorrect after sliding window"
+            )
 
     def test_memory_with_long_sequence(self, random_key, small_config):
         """Test memory handling with sequence much longer than memory length."""
@@ -414,13 +424,18 @@ class TestMemoryManagement:
         new_hidden, embedding = model.apply(params, hidden, obs, dones)
 
         # Should complete without error and have correct output shape
-        assert embedding.shape == (seq_len, batch_size, small_config["TRANSFORMER_D_MODEL"])
+        assert embedding.shape == (
+            seq_len,
+            batch_size,
+            small_config["TRANSFORMER_D_MODEL"],
+        )
         assert not jnp.any(jnp.isnan(embedding))
 
 
 # ============================================================================
 # Sequence Length Edge Cases
 # ============================================================================
+
 
 class TestSequenceLengthEdgeCases:
     """Tests for edge cases in sequence length handling."""
@@ -499,14 +514,13 @@ class TestSequenceLengthEdgeCases:
 # Causal Masking Tests
 # ============================================================================
 
+
 class TestCausalMasking:
     """Tests for causal masking in attention."""
 
     def test_no_future_attention(self, random_key, transformer_config):
         """Test that causal mask prevents attending to future positions."""
-        batch_size = 2
         seq_len = 4
-        d_model = transformer_config["TRANSFORMER_D_MODEL"]
         mem_len = transformer_config["TRANSFORMER_MEM_LEN"]
 
         # Create causal mask as in StackedTransformer
@@ -520,8 +534,9 @@ class TestCausalMasking:
             # Query at position q should NOT attend to positions q+1, q+2, ... in input
             for k in range(q + 1, seq_len):
                 kv_pos = mem_len + k
-                assert not causal_mask[q, kv_pos], \
+                assert not causal_mask[q, kv_pos], (
                     f"Query {q} can attend to future position {k} (kv_pos={kv_pos})"
+                )
 
     def test_memory_attention_allowed(self, random_key, transformer_config):
         """Test that all query positions can attend to memory."""
@@ -536,8 +551,9 @@ class TestCausalMasking:
         # All query positions should attend to all memory positions
         for q in range(seq_len):
             for m in range(mem_len):
-                assert causal_mask[q, m], \
+                assert causal_mask[q, m], (
                     f"Query {q} cannot attend to memory position {m}"
+                )
 
     def test_self_attention_allowed(self, random_key, transformer_config):
         """Test that each query position can attend to itself."""
@@ -551,8 +567,7 @@ class TestCausalMasking:
 
         for q in range(seq_len):
             self_pos = mem_len + q
-            assert causal_mask[q, self_pos], \
-                f"Query {q} cannot attend to itself"
+            assert causal_mask[q, self_pos], f"Query {q} cannot attend to itself"
 
     def test_relative_position_shift(self, random_key):
         """Test that _rel_shift produces correct alignment."""
@@ -564,7 +579,9 @@ class TestCausalMasking:
         attn = RelMultiHeadAttention(num_heads=num_heads, d_model=64)
 
         # Create simple test input
-        attn_pos = jnp.arange(batch_size * num_heads * q_len * kv_len, dtype=jnp.float32)
+        attn_pos = jnp.arange(
+            batch_size * num_heads * q_len * kv_len, dtype=jnp.float32
+        )
         attn_pos = attn_pos.reshape(batch_size, num_heads, q_len, kv_len)
 
         shifted = attn._rel_shift(attn_pos, q_len)
@@ -576,6 +593,7 @@ class TestCausalMasking:
 # ============================================================================
 # Configuration Validation Tests
 # ============================================================================
+
 
 class TestConfigurationValidation:
     """Tests for configuration validation."""
@@ -602,7 +620,7 @@ class TestConfigurationValidation:
             d_model=d_model,
             num_heads=num_heads,
             d_ff=None,  # Should default to 4 * d_model
-            use_gating=False
+            use_gating=False,
         )
 
         batch_size = 2
@@ -616,22 +634,23 @@ class TestConfigurationValidation:
         params = block.init(random_key, x, memory, pos_emb)
 
         # Verify by checking parameter shapes
-        ff1_kernel = params['params']['ff1']['kernel']
+        ff1_kernel = params["params"]["ff1"]["kernel"]
         expected_d_ff = 4 * d_model
-        assert ff1_kernel.shape[1] == expected_d_ff, \
+        assert ff1_kernel.shape[1] == expected_d_ff, (
             f"Expected d_ff={expected_d_ff}, got {ff1_kernel.shape[1]}"
+        )
 
 
 # ============================================================================
 # Vmap Compatibility Tests
 # ============================================================================
 
+
 class TestVmapCompatibility:
     """Tests for vmap vectorization compatibility."""
 
     def test_vmap_over_batch(self, random_key, small_config):
         """Test that model works with vmap over batch dimension."""
-        batch_size = 4
         seq_len = 8
         obs_dim = 16
 
@@ -649,7 +668,9 @@ class TestVmapCompatibility:
             return model.apply(params, hidden, obs, dones)
 
         # Test single forward
-        new_hidden, embedding = forward_single(params, hidden_single, obs_single, dones_single)
+        new_hidden, embedding = forward_single(
+            params, hidden_single, obs_single, dones_single
+        )
         assert embedding.shape == (seq_len, 1, small_config["TRANSFORMER_D_MODEL"])
 
     def test_multiple_seeds_with_vmap(self, random_key, small_config):
@@ -664,9 +685,7 @@ class TestVmapCompatibility:
         keys = jax.random.split(random_key, batch_size)
 
         # Create different observations for each batch element
-        obs = jax.vmap(
-            lambda k: jax.random.normal(k, (seq_len, 1, obs_dim))
-        )(keys)
+        obs = jax.vmap(lambda k: jax.random.normal(k, (seq_len, 1, obs_dim)))(keys)
         obs = obs.reshape(seq_len, batch_size, obs_dim)
 
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
@@ -677,12 +696,13 @@ class TestVmapCompatibility:
         # Each batch element should produce different embeddings
         for i in range(batch_size - 1):
             diff = jnp.abs(embedding[:, i, :] - embedding[:, i + 1, :]).sum()
-            assert diff > 0.1, f"Batch {i} and {i+1} produced identical embeddings"
+            assert diff > 0.1, f"Batch {i} and {i + 1} produced identical embeddings"
 
 
 # ============================================================================
 # Minibatch Handling Tests
 # ============================================================================
+
 
 class TestMinibatchHandling:
     """Tests for minibatch shuffling and reshaping."""
@@ -692,15 +712,15 @@ class TestMinibatchHandling:
         batch_size = 8
         d_model = transformer_config["TRANSFORMER_D_MODEL"]
         mem_len = transformer_config["TRANSFORMER_MEM_LEN"]
-        n_layers = transformer_config["TRANSFORMER_N_LAYERS"]
 
         # Initialize carry
         hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
 
         # Verify shape: (1, batch, mem_len * d_model)
         for i, h in enumerate(hidden):
-            assert h.shape == (1, batch_size, mem_len * d_model), \
+            assert h.shape == (1, batch_size, mem_len * d_model), (
                 f"Layer {i}: Expected (1, {batch_size}, {mem_len * d_model}), got {h.shape}"
+            )
 
         # Simulate minibatch reshape (what happens in PPO training)
         # (1, batch, hidden_dim) -> (1, minibatch_size, hidden_dim) for each minibatch
@@ -730,20 +750,21 @@ class TestMinibatchHandling:
         original_sum = sum(h.sum() for h in hidden)
 
         # Simulate shuffle and split
-        num_minibatches = 4
         perm = jax.random.permutation(random_key, batch_size)
 
         shuffled = [h[:, perm, :] for h in hidden]
         shuffled_sum = sum(h.sum() for h in shuffled)
 
         # Sum should be preserved (data integrity)
-        assert jnp.allclose(original_sum, shuffled_sum), \
+        assert jnp.allclose(original_sum, shuffled_sum), (
             "Data integrity lost during shuffle"
+        )
 
 
 # ============================================================================
 # Cross-Architecture Compatibility Tests
 # ============================================================================
+
 
 class TestCrossArchitectureCompatibility:
     """Tests for compatibility with other architectures (GRU, S5)."""
@@ -756,13 +777,17 @@ class TestCrossArchitectureCompatibility:
 
         # Transformer
         transformer_model = TransformerRepModel(config=transformer_config)
-        transformer_hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        transformer_hidden = TransformerRepModel.initialize_carry(
+            batch_size, transformer_config
+        )
 
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
 
         params_t = transformer_model.init(random_key, transformer_hidden, obs, dones)
-        _, embedding_t = transformer_model.apply(params_t, transformer_hidden, obs, dones)
+        _, embedding_t = transformer_model.apply(
+            params_t, transformer_hidden, obs, dones
+        )
 
         # GRU
         gru_model = GRURepModel(config={})
@@ -781,7 +806,9 @@ class TestCrossArchitectureCompatibility:
         batch_size = 4
 
         # Transformer hidden state
-        transformer_hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        transformer_hidden = TransformerRepModel.initialize_carry(
+            batch_size, transformer_config
+        )
 
         # GRU hidden state
         gru_hidden = GRURepModel.initialize_carry(batch_size, {})
@@ -802,6 +829,7 @@ class TestCrossArchitectureCompatibility:
 # End-to-End Integration Tests
 # ============================================================================
 
+
 class TestEndToEndIntegration:
     """End-to-end tests with ActorCritic and PPO components."""
 
@@ -814,9 +842,7 @@ class TestEndToEndIntegration:
 
         rep_model = TransformerRepModel(config=transformer_config)
         actor_critic = ActorCriticDiscrete(
-            rep_model=rep_model,
-            action_dim=action_dim,
-            config=transformer_config
+            rep_model=rep_model, action_dim=action_dim, config=transformer_config
         )
 
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
@@ -843,9 +869,7 @@ class TestEndToEndIntegration:
 
         rep_model = TransformerRepModel(config=transformer_config)
         actor_critic = ActorCriticDiscrete(
-            rep_model=rep_model,
-            action_dim=action_dim,
-            config=transformer_config
+            rep_model=rep_model, action_dim=action_dim, config=transformer_config
         )
 
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
@@ -858,7 +882,11 @@ class TestEndToEndIntegration:
         def loss_fn(params):
             _, pi, value = actor_critic.apply(params, hidden, x)
             # Simple policy + value loss
-            log_probs = pi.log_prob(jnp.zeros(batch_size * seq_len, dtype=jnp.int32).reshape(seq_len, batch_size))
+            log_probs = pi.log_prob(
+                jnp.zeros(batch_size * seq_len, dtype=jnp.int32).reshape(
+                    seq_len, batch_size
+                )
+            )
             return jnp.mean(value) - 0.01 * jnp.mean(log_probs)
 
         grads = jax.grad(loss_fn)(params)
@@ -880,9 +908,7 @@ class TestEndToEndIntegration:
 
         rep_model = TransformerRepModel(config=small_config)
         actor_critic = ActorCriticDiscrete(
-            rep_model=rep_model,
-            action_dim=action_dim,
-            config=small_config
+            rep_model=rep_model, action_dim=action_dim, config=small_config
         )
 
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
@@ -896,7 +922,7 @@ class TestEndToEndIntegration:
         def train_step(params, obs, dones, hidden):
             def loss_fn(params):
                 _, pi, value = actor_critic.apply(params, hidden, (obs, dones))
-                return jnp.mean(value ** 2)
+                return jnp.mean(value**2)
 
             loss, grads = jax.value_and_grad(loss_fn)(params)
             return loss, grads
@@ -917,9 +943,7 @@ class TestEndToEndIntegration:
 
         rep_model = TransformerRepModel(config=small_config)
         actor_critic = ActorCriticDiscrete(
-            rep_model=rep_model,
-            action_dim=action_dim,
-            config=small_config
+            rep_model=rep_model, action_dim=action_dim, config=small_config
         )
 
         key, subkey = jax.random.split(random_key)
@@ -951,8 +975,9 @@ class TestEndToEndIntegration:
             losses.append(float(loss))
 
         # Loss should generally decrease (may not be monotonic due to stochasticity)
-        assert losses[-1] < losses[0] * 1.5, \
+        assert losses[-1] < losses[0] * 1.5, (
             f"Loss did not decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
+        )
 
 
 if __name__ == "__main__":

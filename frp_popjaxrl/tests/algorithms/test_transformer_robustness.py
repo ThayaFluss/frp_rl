@@ -24,8 +24,8 @@ import pytest
 import sys
 import os
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# Add frp_popjaxrl directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from algorithms.transformer import (
     RelMultiHeadAttention,

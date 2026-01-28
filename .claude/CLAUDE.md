@@ -37,6 +37,12 @@ This repository implements **Free Random Projection (FRP)**, a meta-learning tec
 
 ---
 
+## Development Environment
+
+- Use `uv run python` instead of bare `python`
+
+---
+
 ## Development Workflow
 
 ### Before Writing Code

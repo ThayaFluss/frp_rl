@@ -68,11 +68,11 @@ class Gating(nn.Module):
 
     Attributes:
         d_model: Model dimension
-        bg: Initial bias for gating (default 0.0)
+        bg: Initial bias for gating (default 2.0, as recommended by GTrXL paper)
     """
 
     d_model: int
-    bg: float = 0.0
+    bg: float = 2.0  # GTrXL paper recommends 2.0 for training stability
 
     @nn.compact
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
@@ -417,7 +417,7 @@ class StackedTransformer(nn.Module):
             List of memory tensors, one per layer, each shape (batch, mem_len, d_model)
         """
         d_model = config.get("TRANSFORMER_D_MODEL", 256)
-        n_layers = config.get("TRANSFORMER_N_LAYERS", 2)
+        n_layers = config.get("TRANSFORMER_N_LAYERS", 3)
         mem_len = config.get("TRANSFORMER_MEM_LEN", 64)
 
         return [jnp.zeros((batch_size, mem_len, d_model)) for _ in range(n_layers)]

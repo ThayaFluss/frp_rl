@@ -554,9 +554,9 @@ if __name__ == "__main__":
     ### For Transformer architecture hyperparameters (only used when arch=transformer)
     parser.add_argument("--transformer_d_model", type=int, default=256,
                         help="Transformer model dimension (default: %(default)s)")
-    parser.add_argument("--transformer_num_heads", type=int, default=4,
+    parser.add_argument("--transformer_num_heads", type=int, default=2,
                         help="Transformer number of attention heads (default: %(default)s)")
-    parser.add_argument("--transformer_n_layers", type=int, default=2,
+    parser.add_argument("--transformer_n_layers", type=int, default=3,
                         help="Number of Transformer layers (default: %(default)s)")
     parser.add_argument("--transformer_mem_len", type=int, default=64,
                         help="Transformer memory length (default: %(default)s)")

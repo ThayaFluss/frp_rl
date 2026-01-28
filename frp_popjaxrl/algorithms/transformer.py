@@ -359,11 +359,11 @@ class TransformerBlock(nn.Module):
         ff_out = self.ff2(ff_out)
 
         # Residual connection (with optional gating)
-        # NOTE: Argument order follows transformerXL_PPO_JAX reference implementation.
-        # gate2(ff_out, x) differs from standard gating convention gate(residual, new_input).
-        # This matches: out = self.gate2(out, jax.nn.relu(out_attention)) in the reference.
+        # NOTE: transformerXL_PPO_JAX uses gate2(out, out_attention) which swaps the
+        # residual and new_input arguments. We tried matching that order but it did not
+        # improve results, so we use the standard convention: gate(residual, new_input).
         if self.use_gating:
-            x = self.gate2(ff_out, jax.nn.relu(x))
+            x = self.gate2(x, jax.nn.relu(ff_out))
         else:
             x = x + ff_out
 

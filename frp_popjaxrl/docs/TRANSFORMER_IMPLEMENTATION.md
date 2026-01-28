@@ -156,12 +156,12 @@ else:
 
 ```python
 if self.use_gating:
-    x = self.gate2(ff_out, jax.nn.relu(x))  # Aligned with reference
+    x = self.gate2(x, jax.nn.relu(ff_out))
 else:
     x = x + ff_out
 ```
 
-Both implementations use the same argument order for `gate2`. Note that this differs from standard gating convention where `gate(residual, new_input)` is typical.
+The reference implementation uses swapped argument order for `gate2`. We tried matching that order but it did not improve results, so we use the standard gating convention: `gate(residual, new_input)`.
 
 ### 3. FeedForward Dimension
 

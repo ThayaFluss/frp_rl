@@ -77,39 +77,39 @@ All parameter counts have been verified to match theoretical calculations.
 
 | d_model | heads | layers | d_ff | gating | Theoretical | Actual | Match |
 |---------|-------|--------|------|--------|-------------|--------|-------|
-| 256 | 4 | 1 | 1024 | ON | 1,777,413 | 1,777,413 | ✓ |
-| 256 | 4 | 1 | 1024 | OFF | 990,469 | 990,469 | ✓ |
-| 256 | 4 | 2 | 1024 | ON | 3,420,165 | 3,420,165 | ✓ |
-| 256 | 4 | 2 | 1024 | OFF | 1,846,277 | 1,846,277 | ✓ |
-| 256 | 4 | 4 | 1024 | ON | 6,705,669 | 6,705,669 | ✓ |
-| 256 | 4 | 4 | 1024 | OFF | 3,557,893 | 3,557,893 | ✓ |
-| 128 | 2 | 2 | 512 | ON | 908,933 | 908,933 | ✓ |
-| 512 | 8 | 2 | 2048 | ON | 13,357,829 | 13,357,829 | ✓ |
+| 256 | 4 | 1 | 256 | ON | 1,383,429 | 1,383,429 | ✓ |
+| 256 | 4 | 1 | 256 | OFF | 596,485 | 596,485 | ✓ |
+| 256 | 4 | 2 | 256 | ON | 2,632,197 | 2,632,197 | ✓ |
+| 256 | 4 | 2 | 256 | OFF | 1,058,309 | 1,058,309 | ✓ |
+| 256 | 4 | 4 | 256 | ON | 5,129,733 | 5,129,733 | ✓ |
+| 256 | 4 | 4 | 256 | OFF | 1,981,957 | 1,981,957 | ✓ |
+| 128 | 2 | 2 | 128 | ON | 711,557 | 711,557 | ✓ |
+| 512 | 8 | 2 | 512 | ON | 10,209,029 | 10,209,029 | ✓ |
 
 ### Detailed Breakdown (d_model=256, 2 layers, gating ON)
 
 ```
 Encoder (rep_model_0 + rep_model_1):           35,200 (1%)
-Transformer layers (×2):                    3,285,504 (96%)
+Transformer layers (×2):                    2,497,536 (95%)
   Per-layer breakdown:
     - Attention:                              329,216
     - LayerNorm (2×):                           1,024
-    - FeedForward:                            525,568
+    - FeedForward:                            131,584
     - Gating (2×):                            786,944
-    - Per-layer total:                      1,642,752
-Actor head:                                    49,924 (1%)
-Critic head:                                   49,537 (1%)
+    - Per-layer total:                      1,248,768
+Actor head:                                    49,924 (2%)
+Critic head:                                   49,537 (2%)
 ─────────────────────────────────────────────────────────
-TOTAL:                                      3,420,165
+TOTAL:                                      2,632,197
 ```
 
 ### Gating Effect
 
 | Layers | Gating Params | Total Ratio (ON/OFF) |
 |--------|---------------|----------------------|
-| 1 | 786,944 | 1.79× |
-| 2 | 1,573,888 | 1.85× |
-| 4 | 3,147,776 | 1.88× |
+| 1 | 786,944 | 2.32× |
+| 2 | 1,573,888 | 2.49× |
+| 4 | 3,147,776 | 2.59× |
 
 ### Comparison with GRU/S5
 
@@ -119,9 +119,9 @@ TOTAL:                                      3,420,165
 | S5 | 1 layer, 256 dim | 397,957 | 0.8× |
 | S5 | 2 layers, 256 dim | 661,253 | 1.3× |
 | S5 | 4 layers, 256 dim | 1,187,845 | 2.2× |
-| Transformer | 1 layer, gating OFF | 990,469 | 1.9× |
-| Transformer | 2 layers, gating OFF | 1,846,277 | 3.5× |
-| Transformer | 2 layers, gating ON | 3,420,165 | 6.5× |
+| Transformer | 1 layer, gating OFF | 596,485 | 1.1× |
+| Transformer | 2 layers, gating OFF | 1,058,309 | 2.0× |
+| Transformer | 2 layers, gating ON | 2,632,197 | 5.0× |
 | Transformer | 4 layers, gating ON | 6,702,597 | 12.7× |
 
 **Note:** `mem_len` and `num_heads` do not affect parameter count (they are architectural hyperparameters).
@@ -137,17 +137,17 @@ The reference implementation is [transformerXL_PPO_JAX](https://github.com/Reytu
 | Implementation | Default Value | Source |
 |----------------|---------------|--------|
 | transformerXL_PPO_JAX | `bg=0.0` | - |
-| frp_popjaxrl | `bg=2.0` | GTrXL paper recommendation |
+| frp_popjaxrl | `bg=0.0` | Aligned with reference |
 
-The GTrXL paper (Parisotto et al., 2019) recommends `bg=2.0` for training stability, which biases the gate towards passing through the residual connection initially.
+Both implementations use `bg=0.0` by default.
 
-### 2. Gating Application (Bug Fix)
+### 2. Gating Application
 
 **transformerXL_PPO_JAX (line 79-80):**
 
 ```python
 if(self.gating):
-    out= self.gate2(out, jax.nn.relu(out_attention))  # ← Incorrect
+    out= self.gate2(out, jax.nn.relu(out_attention))
 else:
     out = out + out_attention
 ```
@@ -156,21 +156,21 @@ else:
 
 ```python
 if self.use_gating:
-    x = self.gate2(x, jax.nn.relu(ff_out))  # ← Correct
+    x = self.gate2(ff_out, jax.nn.relu(x))  # Aligned with reference
 else:
     x = x + ff_out
 ```
 
-The reference implementation appears to have a bug where `gate2` receives `out_attention` instead of the feedforward output `out`. Our implementation correctly gates the feedforward output.
+Both implementations use the same argument order for `gate2`. Note that this differs from standard gating convention where `gate(residual, new_input)` is typical.
 
 ### 3. FeedForward Dimension
 
 | Implementation | d_ff | Ratio |
 |----------------|------|-------|
 | transformerXL_PPO_JAX | d_model | 1× |
-| frp_popjaxrl | 4 × d_model | 4× (standard) |
+| frp_popjaxrl | d_model | 1× (aligned) |
 
-The standard Transformer uses `d_ff = 4 × d_model`. The reference implementation uses a smaller FFN.
+Both implementations use `d_ff = d_model` by default.
 
 ### 4. Relative Position Shift
 
@@ -230,7 +230,7 @@ Both implementations use `use_bias=True` for Q/K/V projections, following the re
 | `TRANSFORMER_D_MODEL` | 256 | Model dimension |
 | `TRANSFORMER_NUM_HEADS` | 4 | Number of attention heads |
 | `TRANSFORMER_N_LAYERS` | 2 | Number of transformer layers |
-| `TRANSFORMER_D_FF` | 4 × d_model | Feedforward hidden dimension |
+| `TRANSFORMER_D_FF` | d_model | Feedforward hidden dimension (following transformerXL_PPO_JAX) |
 | `TRANSFORMER_MEM_LEN` | 64 | Memory length per layer |
 | `TRANSFORMER_DROPOUT` | 0.0 | Dropout rate |
 | `TRANSFORMER_GATING` | True | Use GTrXL gating |
@@ -246,7 +246,7 @@ config = {
     "TRANSFORMER_D_MODEL": 256,
     "TRANSFORMER_NUM_HEADS": 4,
     "TRANSFORMER_N_LAYERS": 2,
-    "TRANSFORMER_D_FF": 1024,
+    "TRANSFORMER_D_FF": 256,  # d_ff = d_model (default)
     "TRANSFORMER_MEM_LEN": 64,
     "TRANSFORMER_DROPOUT": 0.0,
     "TRANSFORMER_GATING": True,

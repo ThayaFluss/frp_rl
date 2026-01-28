@@ -68,11 +68,11 @@ class Gating(nn.Module):
 
     Attributes:
         d_model: Model dimension
-        bg: Initial bias for gating (default 2.0, as recommended by GTrXL paper)
+        bg: Initial bias for gating (default 0.0, following transformerXL_PPO_JAX)
     """
 
     d_model: int
-    bg: float = 2.0  # GTrXL paper recommends 2.0 for training stability
+    bg: float = 0.0  # Following transformerXL_PPO_JAX reference implementation
 
     @nn.compact
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
@@ -276,7 +276,7 @@ class TransformerBlock(nn.Module):
     Attributes:
         d_model: Model dimension
         num_heads: Number of attention heads
-        d_ff: Feed-forward hidden dimension (default: 4 * d_model)
+        d_ff: Feed-forward hidden dimension (default: d_model, following transformerXL_PPO_JAX)
         dropout_rate: Dropout rate
         use_gating: Whether to use GTrXL gating
     """
@@ -288,7 +288,8 @@ class TransformerBlock(nn.Module):
     use_gating: bool = True
 
     def setup(self):
-        d_ff = self.d_ff if self.d_ff is not None else 4 * self.d_model
+        # Default d_ff = d_model, following transformerXL_PPO_JAX
+        d_ff = self.d_ff if self.d_ff is not None else self.d_model
 
         self.attention = RelMultiHeadAttention(
             num_heads=self.num_heads,
@@ -358,8 +359,11 @@ class TransformerBlock(nn.Module):
         ff_out = self.ff2(ff_out)
 
         # Residual connection (with optional gating)
+        # NOTE: Argument order follows transformerXL_PPO_JAX reference implementation.
+        # gate2(ff_out, x) differs from standard gating convention gate(residual, new_input).
+        # This matches: out = self.gate2(out, jax.nn.relu(out_attention)) in the reference.
         if self.use_gating:
-            x = self.gate2(x, jax.nn.relu(ff_out))
+            x = self.gate2(ff_out, jax.nn.relu(x))
         else:
             x = x + ff_out
 

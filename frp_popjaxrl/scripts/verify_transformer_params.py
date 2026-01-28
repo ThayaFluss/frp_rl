@@ -138,14 +138,15 @@ def main():
 
     test_cases = [
         # (d_model, num_heads, n_layers, d_ff, use_gating)
-        (256, 4, 1, 1024, True),
-        (256, 4, 1, 1024, False),
-        (256, 4, 2, 1024, True),
-        (256, 4, 2, 1024, False),
-        (256, 4, 4, 1024, True),
-        (256, 4, 4, 1024, False),
-        (128, 2, 2, 512, True),
-        (512, 8, 2, 2048, True),
+        # d_ff = d_model following transformerXL_PPO_JAX
+        (256, 4, 1, 256, True),
+        (256, 4, 1, 256, False),
+        (256, 4, 2, 256, True),
+        (256, 4, 2, 256, False),
+        (256, 4, 4, 256, True),
+        (256, 4, 4, 256, False),
+        (128, 2, 2, 128, True),
+        (512, 8, 2, 512, True),
     ]
 
     print("=" * 100)
@@ -188,9 +189,9 @@ def main():
 
     # Detailed breakdown for one case
     print("\n" + "=" * 100)
-    print("Detailed Breakdown (d_model=256, heads=4, layers=2, d_ff=1024, gating=ON)")
+    print("Detailed Breakdown (d_model=256, heads=4, layers=2, d_ff=256, gating=ON)")
     print("=" * 100)
-    breakdown = theoretical_transformer_params(obs_dim, action_dim, 256, 4, 2, 1024, True)
+    breakdown = theoretical_transformer_params(obs_dim, action_dim, 256, 4, 2, 256, True)
     print(f"  Encoder (rep_model_0 + rep_model_1):     {breakdown['encoder']:>12,}")
     print(f"  Per-layer breakdown:")
     print(f"    - Attention:                          {breakdown['attention_per_layer']:>12,}")
@@ -210,8 +211,8 @@ def main():
     print("Gating Effect Analysis")
     print("=" * 100)
     for n_layers in [1, 2, 4]:
-        on = theoretical_transformer_params(obs_dim, action_dim, 256, 4, n_layers, 1024, True)
-        off = theoretical_transformer_params(obs_dim, action_dim, 256, 4, n_layers, 1024, False)
+        on = theoretical_transformer_params(obs_dim, action_dim, 256, 4, n_layers, 256, True)
+        off = theoretical_transformer_params(obs_dim, action_dim, 256, 4, n_layers, 256, False)
         gating_total = on["gating_per_layer"] * n_layers
         ratio = on["total"] / off["total"]
         print(f"  {n_layers} layer(s): Gating adds {gating_total:,} params ({ratio:.2f}x total)")

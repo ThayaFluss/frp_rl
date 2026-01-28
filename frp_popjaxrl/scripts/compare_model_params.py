@@ -46,11 +46,11 @@ class ModelConfig:
             "S5_DO_NORM": False,
             "S5_PRENORM": False,
             "S5_DO_GTRXL_NORM": False,
-            # Transformer settings
+            # Transformer settings (d_ff = d_model following transformerXL_PPO_JAX)
             "TRANSFORMER_D_MODEL": self.dim,
             "TRANSFORMER_NUM_HEADS": self.heads if self.heads else 4,
             "TRANSFORMER_N_LAYERS": self.layers,
-            "TRANSFORMER_D_FF": self.dim * 4,
+            "TRANSFORMER_D_FF": self.dim,  # d_ff = d_model, following transformerXL_PPO_JAX
             "TRANSFORMER_MEM_LEN": self.mem_len if self.mem_len else 64,
             "TRANSFORMER_DROPOUT": 0.0,
             "TRANSFORMER_GATING": self.gating if self.gating is not None else True,

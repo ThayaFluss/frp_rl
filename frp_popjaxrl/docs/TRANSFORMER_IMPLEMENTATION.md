@@ -77,39 +77,39 @@ All parameter counts have been verified to match theoretical calculations.
 
 | d_model | heads | layers | d_ff | gating | Theoretical | Actual | Match |
 |---------|-------|--------|------|--------|-------------|--------|-------|
-| 256 | 4 | 1 | 1024 | ON | 1,776,645 | 1,776,645 | ✓ |
-| 256 | 4 | 1 | 1024 | OFF | 989,701 | 989,701 | ✓ |
-| 256 | 4 | 2 | 1024 | ON | 3,418,629 | 3,418,629 | ✓ |
-| 256 | 4 | 2 | 1024 | OFF | 1,844,741 | 1,844,741 | ✓ |
-| 256 | 4 | 4 | 1024 | ON | 6,702,597 | 6,702,597 | ✓ |
-| 256 | 4 | 4 | 1024 | OFF | 3,554,821 | 3,554,821 | ✓ |
-| 128 | 2 | 2 | 512 | ON | 908,165 | 908,165 | ✓ |
-| 512 | 8 | 2 | 2048 | ON | 13,354,757 | 13,354,757 | ✓ |
+| 256 | 4 | 1 | 1024 | ON | 1,777,413 | 1,777,413 | ✓ |
+| 256 | 4 | 1 | 1024 | OFF | 990,469 | 990,469 | ✓ |
+| 256 | 4 | 2 | 1024 | ON | 3,420,165 | 3,420,165 | ✓ |
+| 256 | 4 | 2 | 1024 | OFF | 1,846,277 | 1,846,277 | ✓ |
+| 256 | 4 | 4 | 1024 | ON | 6,705,669 | 6,705,669 | ✓ |
+| 256 | 4 | 4 | 1024 | OFF | 3,557,893 | 3,557,893 | ✓ |
+| 128 | 2 | 2 | 512 | ON | 908,933 | 908,933 | ✓ |
+| 512 | 8 | 2 | 2048 | ON | 13,357,829 | 13,357,829 | ✓ |
 
 ### Detailed Breakdown (d_model=256, 2 layers, gating ON)
 
 ```
 Encoder (rep_model_0 + rep_model_1):           35,200 (1%)
-Transformer layers (×2):                    3,283,968 (96%)
+Transformer layers (×2):                    3,285,504 (96%)
   Per-layer breakdown:
-    - Attention:                              328,448
+    - Attention:                              329,216
     - LayerNorm (2×):                           1,024
     - FeedForward:                            525,568
     - Gating (2×):                            786,944
-    - Per-layer total:                      1,641,984
+    - Per-layer total:                      1,642,752
 Actor head:                                    49,924 (1%)
 Critic head:                                   49,537 (1%)
 ─────────────────────────────────────────────────────────
-TOTAL:                                      3,418,629
+TOTAL:                                      3,420,165
 ```
 
 ### Gating Effect
 
 | Layers | Gating Params | Total Ratio (ON/OFF) |
 |--------|---------------|----------------------|
-| 1 | 786,944 | 1.80× |
+| 1 | 786,944 | 1.79× |
 | 2 | 1,573,888 | 1.85× |
-| 4 | 3,147,776 | 1.89× |
+| 4 | 3,147,776 | 1.88× |
 
 ### Comparison with GRU/S5
 
@@ -119,9 +119,9 @@ TOTAL:                                      3,418,629
 | S5 | 1 layer, 256 dim | 397,957 | 0.8× |
 | S5 | 2 layers, 256 dim | 661,253 | 1.3× |
 | S5 | 4 layers, 256 dim | 1,187,845 | 2.2× |
-| Transformer | 1 layer, gating OFF | 989,701 | 1.9× |
-| Transformer | 2 layers, gating OFF | 1,844,741 | 3.5× |
-| Transformer | 2 layers, gating ON | 3,418,629 | 6.5× |
+| Transformer | 1 layer, gating OFF | 990,469 | 1.9× |
+| Transformer | 2 layers, gating OFF | 1,846,277 | 3.5× |
+| Transformer | 2 layers, gating ON | 3,420,165 | 6.5× |
 | Transformer | 4 layers, gating ON | 6,702,597 | 12.7× |
 
 **Note:** `mem_len` and `num_heads` do not affect parameter count (they are architectural hyperparameters).
@@ -217,9 +217,9 @@ Both use pre-LayerNorm architecture.
 | Implementation | use_bias |
 |----------------|----------|
 | transformerXL_PPO_JAX | True (via DenseGeneral default) |
-| frp_popjaxrl | False (explicit) |
+| frp_popjaxrl | True (aligned with reference) |
 
-Our implementation uses `use_bias=False` for Q/K/V projections following the original TransformerXL paper. Output projection uses bias.
+Both implementations use `use_bias=True` for Q/K/V projections, following the reference implementation. Position embedding projection uses `use_bias=False` in both.
 
 ---
 

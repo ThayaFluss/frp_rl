@@ -133,12 +133,12 @@ class RelMultiHeadAttention(nn.Module):
         )
         self.head_dim = self.d_model // self.num_heads
 
-        # Q, K, V projections
-        self.query_proj = nn.Dense(self.d_model, use_bias=False)
-        self.key_proj = nn.Dense(self.d_model, use_bias=False)
-        self.value_proj = nn.Dense(self.d_model, use_bias=False)
+        # Q, K, V projections (with bias, following transformerXL_PPO_JAX)
+        self.query_proj = nn.Dense(self.d_model, use_bias=True)
+        self.key_proj = nn.Dense(self.d_model, use_bias=True)
+        self.value_proj = nn.Dense(self.d_model, use_bias=True)
 
-        # Position embedding projection
+        # Position embedding projection (no bias, following transformerXL_PPO_JAX)
         self.pos_proj = nn.Dense(self.d_model, use_bias=False)
 
         # Output projection
@@ -449,26 +449,65 @@ class StackedTransformer(nn.Module):
         pos_seq = jnp.arange(total_len - 1, -1, -1, dtype=jnp.float32)
         pos_emb = self.pos_emb(pos_seq)  # (total_len, d_model)
 
-        # Create causal mask
+        # Create causal mask with episode boundary handling
         # Query positions: 0..seq_len-1 attend to memory + preceding query positions
-        # Mask shape: (1, 1, seq_len, total_len)
+        # Mask shape: (batch, 1, seq_len, total_len)
         q_idx = jnp.arange(seq_len)[:, None]  # (seq_len, 1)
         kv_idx = jnp.arange(total_len)[None, :]  # (1, total_len)
         # Each query at position i can attend to all memory + positions 0..i in input
-        # kv_idx < mem_len means memory (always attend)
+        # kv_idx < mem_len means memory (always attend without done handling)
         # kv_idx - mem_len <= q_idx means current or earlier position in query
         causal_mask = (kv_idx < mem_len) | ((kv_idx - mem_len) <= q_idx)
         causal_mask = causal_mask[None, None, :, :]  # (1, 1, seq_len, total_len)
+
+        # Episode boundary mask: prevent attending across done boundaries
+        # dones: (batch, seq_len) - True when episode ends at that timestep
+        # If done[t] = True, positions t+1 onwards should NOT attend to positions <= t
+        #
+        # Compute cumulative episode index: each done increments the episode number
+        # cumsum_dones[t] = number of episode boundaries before position t
+        # Two positions are in the same episode if they have the same cumsum value
+        cumsum_dones = jnp.cumsum(dones, axis=1)  # (batch, seq_len)
+        # For query position q and key position k (in sequence, not memory):
+        # same_episode[q, k] = cumsum_dones[q] == cumsum_dones[k]
+        # This means no done happened between k and q
+        cumsum_q = cumsum_dones[:, :, None]  # (batch, seq_len, 1)
+        cumsum_k = cumsum_dones[:, None, :]  # (batch, 1, seq_len)
+        same_episode_seq = cumsum_q == cumsum_k  # (batch, seq_len, seq_len)
+
+        # Extend to full kv range: memory positions + sequence positions
+        # Memory positions: always in a "prior" episode, so mask them if ANY done in sequence
+        # Sequence positions: use same_episode_seq
+        any_done = dones.any(axis=1, keepdims=True)  # (batch, 1)
+        # Memory can be attended only if no done occurred in the sequence
+        memory_mask = ~any_done  # (batch, 1) - True if memory is valid
+        memory_mask = jnp.broadcast_to(
+            memory_mask[:, None, :], (batch_size, seq_len, mem_len)
+        )  # (batch, seq_len, mem_len)
+        # Combine memory mask and sequence episode mask
+        episode_mask = jnp.concatenate(
+            [memory_mask, same_episode_seq], axis=2
+        )  # (batch, seq_len, total_len)
+        episode_mask = episode_mask[:, None, :, :]  # (batch, 1, seq_len, total_len)
+
+        # Final mask: causal AND same episode
+        causal_mask = causal_mask & episode_mask  # (batch, 1, seq_len, total_len)
+
+        # Compute the last episode start index for memory update
+        # We want to keep only activations from the current (last) episode
+        # Find the last done position in each batch, then the episode starts at last_done + 1
+        # If no done in sequence, keep all activations
+        # done_positions: position of last True in dones, or -1 if no done
+        done_indices = jnp.where(dones, jnp.arange(seq_len), -1)  # (batch, seq_len)
+        last_done_pos = done_indices.max(axis=1)  # (batch,) - last done position or -1
 
         new_memories = []
         for i, layer in enumerate(self.layers):
             memory = memories[i]
 
-            # Reset memory on episode boundaries
-            # Check if any done in sequence - if done at position j, reset memory
-            # For simplicity, reset entire memory if ANY done in sequence
-            # dones: (batch, seq_len)
-            any_done = dones.any(axis=1, keepdims=True)  # (batch, 1)
+            # Reset input memory if any done in sequence (memory from prev call is stale)
+            # Note: attention mask already handles this, but we also zero the memory
+            # to ensure clean state for memory concatenation below
             memory = jnp.where(
                 any_done[:, :, None],  # (batch, 1, 1)
                 jnp.zeros_like(memory),
@@ -478,11 +517,29 @@ class StackedTransformer(nn.Module):
             # Forward through layer
             x = layer(x, memory, pos_emb, mask=causal_mask, deterministic=deterministic)
 
-            # Update memory with sliding window
-            # Concatenate old memory and new activations, then take last mem_len
+            # Update memory with sliding window, considering episode boundaries
+            # We only want to keep activations from the current episode
+            # Concatenate zeroed memory (if done occurred) and new activations
             combined = jnp.concatenate(
                 [memory, x], axis=1
             )  # (batch, mem_len + seq_len, d_model)
+
+            # For each batch, we want positions from (last_done_pos + 1) to end
+            # But we take at most mem_len positions from the end
+            # The combined array has: [memory (mem_len)] + [x (seq_len)]
+            # Position of last_done in combined: mem_len + last_done_pos
+            # Start of current episode in combined: mem_len + last_done_pos + 1
+            # We want to zero out everything before the current episode start
+            combined_pos = jnp.arange(total_len)  # (total_len,)
+            episode_start = mem_len + last_done_pos + 1  # (batch,)
+            # Mask: True for positions in current episode
+            in_current_episode = combined_pos[None, :] >= episode_start[:, None]  # (batch, total_len)
+            combined = jnp.where(
+                in_current_episode[:, :, None],  # (batch, total_len, 1)
+                combined,
+                jnp.zeros_like(combined),
+            )
+
             new_memory = combined[:, -self.mem_len :, :]  # (batch, mem_len, d_model)
             new_memories.append(new_memory)
 

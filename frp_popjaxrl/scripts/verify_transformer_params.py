@@ -33,11 +33,11 @@ def theoretical_transformer_params(
 
     # RelMultiHeadAttention
     head_dim = d_model // num_heads
-    query_proj = d_model * d_model  # no bias
-    key_proj = d_model * d_model
-    value_proj = d_model * d_model
-    pos_proj = d_model * d_model
-    out_proj = d_model * d_model + d_model  # with bias
+    query_proj = d_model * d_model + d_model  # with bias (following transformerXL_PPO_JAX)
+    key_proj = d_model * d_model + d_model    # with bias
+    value_proj = d_model * d_model + d_model  # with bias
+    pos_proj = d_model * d_model              # no bias
+    out_proj = d_model * d_model + d_model    # with bias
     r_w_bias = num_heads * head_dim
     r_r_bias = num_heads * head_dim
     attention_params = query_proj + key_proj + value_proj + pos_proj + out_proj + r_w_bias + r_r_bias

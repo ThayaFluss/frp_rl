@@ -3,7 +3,8 @@
     "allow": [
       "Bash(python run_meta_popgym.py:*)",
       "Bash(python run_eval.py:*)",
-      "Bash(flake8:*)",
+      "Bash(ruff:*)",
+      "Bash(ty:*)",
       "Bash(python -m py_compile:*)",
       "Bash(python:*)",
       "Bash(timeout 180 python -m pytest:*)",
@@ -16,13 +17,15 @@
       "Bash(source .venv/bin/activate)",
       "Bash(ls:*)",
       "Bash(source:*)",
-      "Bash(pylint:*)",
       "Bash(gh pr view:*)",
       "Bash(git add:*)",
       "Bash(WANDB_MODE=disabled python run_meta_popgym_separated.py:*)",
       "Bash(git restore:*)",
       "Bash(git commit:*)",
-      "Bash(git push)"
+      "Bash(git push)",
+      "Bash(.venv/bin/ruff check . --statistics)",
+      "Bash(.venv/bin/ruff format:*)",
+      "Bash(.venv/bin/ty check:*)"
     ]
   }
 }

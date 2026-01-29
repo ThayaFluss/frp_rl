@@ -56,6 +56,7 @@ def make_train(config):
     linear_schedule = make_linear_schedule(config)
 
     # Create network with encoder type from config (defaults to 'gru')
+    # Note: GTrXL uses ppo_gtrxl_frp.py instead - this file is for GRU/S5 only
     model_type = config.get("MODEL_TYPE", "gru").lower()
     network = create_network(model_type, env.action_space(env_params), config)
 
@@ -332,16 +333,8 @@ def make_train(config):
                 def _update_minbatch(train_state, batch_info):
                     init_hstate, traj_batch, advantages, targets = batch_info
 
-                    def _loss_fn(params, init_hstate, traj_batch, gae, targets):
-                        # RERUN NETWORK
-                        # For Transformer: always start from fresh memory to avoid
-                        # minibatch shuffling issues (where env A's obs gets env B's memory).
-                        # GRU/S5 recompute hidden state from trajectory anyway, so this is
-                        # consistent behavior across all architectures.
-                        if model_type == "transformer":
-                            # traj_batch.obs shape: (seq_len, batch_size, obs_dim)
-                            batch_size = traj_batch.obs.shape[1]
-                            init_hstate = network.initialize_core_hidden_state(batch_size)
+                    def _loss_fn_standard(params, init_hstate, traj_batch, gae, targets):
+                        """Standard loss function for GRU/S5."""
                         _, pi, value = network.apply(params, init_hstate, (traj_batch.obs, traj_batch.done))
                         log_prob = pi.log_prob(traj_batch.action)
 
@@ -363,8 +356,9 @@ def make_train(config):
                         total_loss = loss_actor + config["VF_COEF"] * value_loss - config["ENT_COEF"] * entropy
                         return total_loss, (value_loss, loss_actor, entropy)
 
-                    grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
+                    grad_fn = jax.value_and_grad(_loss_fn_standard, has_aux=True)
                     total_loss, grads = grad_fn(train_state.params, init_hstate, traj_batch, advantages, targets)
+
                     train_state = train_state.apply_gradients(grads=grads)
                     return train_state, total_loss
 

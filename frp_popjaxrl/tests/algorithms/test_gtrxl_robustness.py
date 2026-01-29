@@ -1,5 +1,5 @@
 """
-Robustness tests for TransformerXL implementation.
+Robustness tests for GTrXL (Gated TransformerXL) implementation.
 
 This module contains comprehensive tests for:
 - Numerical stability (NaN/Inf, extreme values, gradient computation)
@@ -27,12 +27,12 @@ import os
 # Add frp_popjaxrl directory to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from algorithms.transformer import (
+from algorithms.gtrxl import (
     RelMultiHeadAttention,
     TransformerBlock,
     StackedTransformer,
 )
-from algorithms.models import TransformerRepModel, GRURepModel, ActorCriticDiscrete
+from algorithms.models import GTrXLRepModel, GRURepModel, ActorCriticDiscrete
 
 
 @pytest.fixture
@@ -42,16 +42,16 @@ def random_key():
 
 
 @pytest.fixture
-def transformer_config():
-    """Fixture to provide transformer configuration."""
+def gtrxl_config():
+    """Fixture to provide GTrXL configuration."""
     return {
-        "TRANSFORMER_D_MODEL": 64,
-        "TRANSFORMER_NUM_HEADS": 4,
-        "TRANSFORMER_N_LAYERS": 2,
-        "TRANSFORMER_D_FF": 128,
-        "TRANSFORMER_MEM_LEN": 16,
-        "TRANSFORMER_DROPOUT": 0.0,
-        "TRANSFORMER_GATING": True,
+        "GTRXL_D_MODEL": 64,
+        "GTRXL_NUM_HEADS": 4,
+        "GTRXL_N_LAYERS": 2,
+        "GTRXL_D_FF": 128,
+        "GTRXL_MEM_LEN": 16,
+        "GTRXL_DROPOUT": 0.0,
+        "GTRXL_GATING": True,
     }
 
 
@@ -59,13 +59,13 @@ def transformer_config():
 def small_config():
     """Fixture for small configuration (faster tests)."""
     return {
-        "TRANSFORMER_D_MODEL": 32,
-        "TRANSFORMER_NUM_HEADS": 2,
-        "TRANSFORMER_N_LAYERS": 1,
-        "TRANSFORMER_D_FF": 64,
-        "TRANSFORMER_MEM_LEN": 8,
-        "TRANSFORMER_DROPOUT": 0.0,
-        "TRANSFORMER_GATING": True,
+        "GTRXL_D_MODEL": 32,
+        "GTRXL_NUM_HEADS": 2,
+        "GTRXL_N_LAYERS": 1,
+        "GTRXL_D_FF": 64,
+        "GTRXL_MEM_LEN": 8,
+        "GTRXL_DROPOUT": 0.0,
+        "GTRXL_GATING": True,
     }
 
 
@@ -77,16 +77,16 @@ def small_config():
 class TestNumericalStability:
     """Tests for numerical stability in transformer operations."""
 
-    def test_no_nan_in_forward_pass(self, random_key, transformer_config):
+    def test_no_nan_in_forward_pass(self, random_key, gtrxl_config):
         """Test that forward pass produces no NaN values with normal inputs."""
         batch_size = 4
         seq_len = 8
         obs_dim = 16
 
-        model = TransformerRepModel(config=transformer_config)
+        model = GTrXLRepModel(config=gtrxl_config)
         obs = jnp.ones((seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         params = model.init(random_key, hidden, obs, dones)
         new_hidden, embedding = model.apply(params, hidden, obs, dones)
@@ -96,16 +96,16 @@ class TestNumericalStability:
         for i, h in enumerate(new_hidden):
             assert not jnp.any(jnp.isnan(h)), f"NaN detected in hidden state layer {i}"
 
-    def test_no_inf_in_forward_pass(self, random_key, transformer_config):
+    def test_no_inf_in_forward_pass(self, random_key, gtrxl_config):
         """Test that forward pass produces no Inf values."""
         batch_size = 4
         seq_len = 8
         obs_dim = 16
 
-        model = TransformerRepModel(config=transformer_config)
+        model = GTrXLRepModel(config=gtrxl_config)
         obs = jnp.ones((seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         params = model.init(random_key, hidden, obs, dones)
         new_hidden, embedding = model.apply(params, hidden, obs, dones)
@@ -114,17 +114,17 @@ class TestNumericalStability:
         for i, h in enumerate(new_hidden):
             assert not jnp.any(jnp.isinf(h)), f"Inf detected in hidden state layer {i}"
 
-    def test_extreme_large_input_values(self, random_key, transformer_config):
+    def test_extreme_large_input_values(self, random_key, gtrxl_config):
         """Test stability with large input values."""
         batch_size = 4
         seq_len = 8
         obs_dim = 16
 
-        model = TransformerRepModel(config=transformer_config)
+        model = GTrXLRepModel(config=gtrxl_config)
         # Large but not extreme values (to avoid immediate overflow)
         obs = jnp.ones((seq_len, batch_size, obs_dim)) * 100.0
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         params = model.init(random_key, hidden, obs, dones)
         new_hidden, embedding = model.apply(params, hidden, obs, dones)
@@ -133,16 +133,16 @@ class TestNumericalStability:
         assert not jnp.any(jnp.isnan(embedding)), "NaN with large inputs"
         assert not jnp.any(jnp.isinf(embedding)), "Inf with large inputs"
 
-    def test_extreme_small_input_values(self, random_key, transformer_config):
+    def test_extreme_small_input_values(self, random_key, gtrxl_config):
         """Test stability with very small input values."""
         batch_size = 4
         seq_len = 8
         obs_dim = 16
 
-        model = TransformerRepModel(config=transformer_config)
+        model = GTrXLRepModel(config=gtrxl_config)
         obs = jnp.ones((seq_len, batch_size, obs_dim)) * 1e-6
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         params = model.init(random_key, hidden, obs, dones)
         new_hidden, embedding = model.apply(params, hidden, obs, dones)
@@ -150,17 +150,17 @@ class TestNumericalStability:
         assert not jnp.any(jnp.isnan(embedding)), "NaN with small inputs"
         assert not jnp.any(jnp.isinf(embedding)), "Inf with small inputs"
 
-    def test_mixed_sign_inputs(self, random_key, transformer_config):
+    def test_mixed_sign_inputs(self, random_key, gtrxl_config):
         """Test stability with mixed positive and negative inputs."""
         batch_size = 4
         seq_len = 8
         obs_dim = 16
 
-        model = TransformerRepModel(config=transformer_config)
+        model = GTrXLRepModel(config=gtrxl_config)
         key1, key2 = jax.random.split(random_key)
         obs = jax.random.normal(key1, (seq_len, batch_size, obs_dim)) * 10.0
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         params = model.init(key2, hidden, obs, dones)
         new_hidden, embedding = model.apply(params, hidden, obs, dones)
@@ -193,16 +193,16 @@ class TestNumericalStability:
         assert not jnp.any(jnp.isnan(output)), "NaN in attention output"
         assert jnp.all(jnp.abs(output) < 1000), "Attention output unbounded"
 
-    def test_gradient_computation_no_nan(self, random_key, transformer_config):
+    def test_gradient_computation_no_nan(self, random_key, gtrxl_config):
         """Test that gradient computation produces no NaN values."""
         batch_size = 4
         seq_len = 8
         obs_dim = 16
 
-        model = TransformerRepModel(config=transformer_config)
+        model = GTrXLRepModel(config=gtrxl_config)
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         params = model.init(random_key, hidden, obs, dones)
 
@@ -220,16 +220,16 @@ class TestNumericalStability:
 
         check_tree_no_nan(grads)
 
-    def test_gradient_flow_through_layers(self, random_key, transformer_config):
+    def test_gradient_flow_through_layers(self, random_key, gtrxl_config):
         """Test that gradients flow through all layers without vanishing/exploding."""
         batch_size = 4
         seq_len = 8
         obs_dim = 16
 
-        model = TransformerRepModel(config=transformer_config)
+        model = GTrXLRepModel(config=gtrxl_config)
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         params = model.init(random_key, hidden, obs, dones)
 
@@ -263,20 +263,20 @@ class TestNumericalStability:
 class TestMemoryManagement:
     """Tests for memory reset and sliding window behavior."""
 
-    def test_memory_actually_reset_on_done(self, random_key, transformer_config):
+    def test_memory_actually_reset_on_done(self, random_key, gtrxl_config):
         """Test that memory is actually zeroed when done signal is True."""
         batch_size = 2
         seq_len = 4
-        d_model = transformer_config["TRANSFORMER_D_MODEL"]
-        n_layers = transformer_config["TRANSFORMER_N_LAYERS"]
-        mem_len = transformer_config["TRANSFORMER_MEM_LEN"]
+        d_model = gtrxl_config["GTRXL_D_MODEL"]
+        n_layers = gtrxl_config["GTRXL_N_LAYERS"]
+        mem_len = gtrxl_config["GTRXL_MEM_LEN"]
 
         transformer = StackedTransformer(
             d_model=d_model,
-            num_heads=transformer_config["TRANSFORMER_NUM_HEADS"],
+            num_heads=gtrxl_config["GTRXL_NUM_HEADS"],
             n_layers=n_layers,
             mem_len=mem_len,
-            use_gating=transformer_config["TRANSFORMER_GATING"],
+            use_gating=gtrxl_config["GTRXL_GATING"],
         )
 
         # Initialize with non-zero memory
@@ -307,20 +307,20 @@ class TestMemoryManagement:
                 f"Layer {layer_idx}: Memory not reset for batch 0"
             )
 
-    def test_memory_reset_preserves_other_batches(self, random_key, transformer_config):
+    def test_memory_reset_preserves_other_batches(self, random_key, gtrxl_config):
         """Test that done signal only affects the relevant batch element."""
         batch_size = 4
         seq_len = 4
-        d_model = transformer_config["TRANSFORMER_D_MODEL"]
-        n_layers = transformer_config["TRANSFORMER_N_LAYERS"]
-        mem_len = transformer_config["TRANSFORMER_MEM_LEN"]
+        d_model = gtrxl_config["GTRXL_D_MODEL"]
+        n_layers = gtrxl_config["GTRXL_N_LAYERS"]
+        mem_len = gtrxl_config["GTRXL_MEM_LEN"]
 
         transformer = StackedTransformer(
             d_model=d_model,
-            num_heads=transformer_config["TRANSFORMER_NUM_HEADS"],
+            num_heads=gtrxl_config["GTRXL_NUM_HEADS"],
             n_layers=n_layers,
             mem_len=mem_len,
-            use_gating=transformer_config["TRANSFORMER_GATING"],
+            use_gating=gtrxl_config["GTRXL_GATING"],
         )
 
         memories = [jnp.ones((batch_size, mem_len, d_model)) for _ in range(n_layers)]
@@ -350,14 +350,14 @@ class TestMemoryManagement:
                     f"Layer {layer_idx}, Batch {batch_idx}: Memory changed unexpectedly"
                 )
 
-    def test_memory_persistence_across_calls(self, random_key, transformer_config):
+    def test_memory_persistence_across_calls(self, random_key, gtrxl_config):
         """Test that memory persists correctly across multiple forward passes."""
         batch_size = 2
         seq_len = 4
         obs_dim = 16
 
-        model = TransformerRepModel(config=transformer_config)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        model = GTrXLRepModel(config=gtrxl_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
@@ -379,20 +379,20 @@ class TestMemoryManagement:
                 f"Layer {i}: Memory appears empty after processing"
             )
 
-    def test_sliding_window_correctness(self, random_key, transformer_config):
+    def test_sliding_window_correctness(self, random_key, gtrxl_config):
         """Test that sliding window memory update works correctly."""
         batch_size = 2
         seq_len = 8  # Longer than mem_len to test sliding
-        d_model = transformer_config["TRANSFORMER_D_MODEL"]
-        n_layers = transformer_config["TRANSFORMER_N_LAYERS"]
-        mem_len = transformer_config["TRANSFORMER_MEM_LEN"]
+        d_model = gtrxl_config["GTRXL_D_MODEL"]
+        n_layers = gtrxl_config["GTRXL_N_LAYERS"]
+        mem_len = gtrxl_config["GTRXL_MEM_LEN"]
 
         transformer = StackedTransformer(
             d_model=d_model,
-            num_heads=transformer_config["TRANSFORMER_NUM_HEADS"],
+            num_heads=gtrxl_config["GTRXL_NUM_HEADS"],
             n_layers=n_layers,
             mem_len=mem_len,
-            use_gating=transformer_config["TRANSFORMER_GATING"],
+            use_gating=gtrxl_config["GTRXL_GATING"],
         )
 
         memories = [jnp.zeros((batch_size, mem_len, d_model)) for _ in range(n_layers)]
@@ -414,8 +414,8 @@ class TestMemoryManagement:
         seq_len = 32  # Much longer than mem_len=8
         obs_dim = 16
 
-        model = TransformerRepModel(config=small_config)
-        hidden = TransformerRepModel.initialize_carry(batch_size, small_config)
+        model = GTrXLRepModel(config=small_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, small_config)
 
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
@@ -427,7 +427,7 @@ class TestMemoryManagement:
         assert embedding.shape == (
             seq_len,
             batch_size,
-            small_config["TRANSFORMER_D_MODEL"],
+            small_config["GTRXL_D_MODEL"],
         )
         assert not jnp.any(jnp.isnan(embedding))
 
@@ -440,73 +440,73 @@ class TestMemoryManagement:
 class TestSequenceLengthEdgeCases:
     """Tests for edge cases in sequence length handling."""
 
-    def test_single_timestep(self, random_key, transformer_config):
+    def test_single_timestep(self, random_key, gtrxl_config):
         """Test processing with seq_len=1."""
         batch_size = 4
         seq_len = 1
         obs_dim = 16
 
-        model = TransformerRepModel(config=transformer_config)
+        model = GTrXLRepModel(config=gtrxl_config)
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         params = model.init(random_key, hidden, obs, dones)
         new_hidden, embedding = model.apply(params, hidden, obs, dones)
 
-        d_model = transformer_config["TRANSFORMER_D_MODEL"]
+        d_model = gtrxl_config["GTRXL_D_MODEL"]
         assert embedding.shape == (seq_len, batch_size, d_model)
         assert not jnp.any(jnp.isnan(embedding))
 
-    def test_sequence_longer_than_memory(self, random_key, transformer_config):
+    def test_sequence_longer_than_memory(self, random_key, gtrxl_config):
         """Test with seq_len > mem_len."""
         batch_size = 4
         seq_len = 32  # mem_len is 16
         obs_dim = 16
 
-        model = TransformerRepModel(config=transformer_config)
+        model = GTrXLRepModel(config=gtrxl_config)
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         params = model.init(random_key, hidden, obs, dones)
         new_hidden, embedding = model.apply(params, hidden, obs, dones)
 
-        d_model = transformer_config["TRANSFORMER_D_MODEL"]
+        d_model = gtrxl_config["GTRXL_D_MODEL"]
         assert embedding.shape == (seq_len, batch_size, d_model)
 
-    def test_sequence_equal_to_memory(self, random_key, transformer_config):
+    def test_sequence_equal_to_memory(self, random_key, gtrxl_config):
         """Test with seq_len == mem_len."""
         batch_size = 4
-        seq_len = transformer_config["TRANSFORMER_MEM_LEN"]
+        seq_len = gtrxl_config["GTRXL_MEM_LEN"]
         obs_dim = 16
 
-        model = TransformerRepModel(config=transformer_config)
+        model = GTrXLRepModel(config=gtrxl_config)
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         params = model.init(random_key, hidden, obs, dones)
         new_hidden, embedding = model.apply(params, hidden, obs, dones)
 
-        d_model = transformer_config["TRANSFORMER_D_MODEL"]
+        d_model = gtrxl_config["GTRXL_D_MODEL"]
         assert embedding.shape == (seq_len, batch_size, d_model)
 
-    def test_batch_size_one(self, random_key, transformer_config):
+    def test_batch_size_one(self, random_key, gtrxl_config):
         """Test with batch_size=1."""
         batch_size = 1
         seq_len = 8
         obs_dim = 16
 
-        model = TransformerRepModel(config=transformer_config)
+        model = GTrXLRepModel(config=gtrxl_config)
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         params = model.init(random_key, hidden, obs, dones)
         new_hidden, embedding = model.apply(params, hidden, obs, dones)
 
-        d_model = transformer_config["TRANSFORMER_D_MODEL"]
+        d_model = gtrxl_config["GTRXL_D_MODEL"]
         assert embedding.shape == (seq_len, batch_size, d_model)
 
 
@@ -518,10 +518,10 @@ class TestSequenceLengthEdgeCases:
 class TestCausalMasking:
     """Tests for causal masking in attention."""
 
-    def test_no_future_attention(self, random_key, transformer_config):
+    def test_no_future_attention(self, random_key, gtrxl_config):
         """Test that causal mask prevents attending to future positions."""
         seq_len = 4
-        mem_len = transformer_config["TRANSFORMER_MEM_LEN"]
+        mem_len = gtrxl_config["GTRXL_MEM_LEN"]
 
         # Create causal mask as in StackedTransformer
         total_len = mem_len + seq_len
@@ -538,10 +538,10 @@ class TestCausalMasking:
                     f"Query {q} can attend to future position {k} (kv_pos={kv_pos})"
                 )
 
-    def test_memory_attention_allowed(self, random_key, transformer_config):
+    def test_memory_attention_allowed(self, random_key, gtrxl_config):
         """Test that all query positions can attend to memory."""
         seq_len = 4
-        mem_len = transformer_config["TRANSFORMER_MEM_LEN"]
+        mem_len = gtrxl_config["GTRXL_MEM_LEN"]
 
         total_len = mem_len + seq_len
         q_idx = jnp.arange(seq_len)[:, None]
@@ -555,10 +555,10 @@ class TestCausalMasking:
                     f"Query {q} cannot attend to memory position {m}"
                 )
 
-    def test_self_attention_allowed(self, random_key, transformer_config):
+    def test_self_attention_allowed(self, random_key, gtrxl_config):
         """Test that each query position can attend to itself."""
         seq_len = 4
-        mem_len = transformer_config["TRANSFORMER_MEM_LEN"]
+        mem_len = gtrxl_config["GTRXL_MEM_LEN"]
 
         total_len = mem_len + seq_len
         q_idx = jnp.arange(seq_len)[:, None]
@@ -654,12 +654,12 @@ class TestVmapCompatibility:
         seq_len = 8
         obs_dim = 16
 
-        model = TransformerRepModel(config=small_config)
+        model = GTrXLRepModel(config=small_config)
 
         # Single sample
         obs_single = jax.random.normal(random_key, (seq_len, 1, obs_dim))
         dones_single = jnp.zeros((seq_len, 1), dtype=jnp.bool_)
-        hidden_single = TransformerRepModel.initialize_carry(1, small_config)
+        hidden_single = GTrXLRepModel.initialize_carry(1, small_config)
 
         params = model.init(random_key, hidden_single, obs_single, dones_single)
 
@@ -671,7 +671,7 @@ class TestVmapCompatibility:
         new_hidden, embedding = forward_single(
             params, hidden_single, obs_single, dones_single
         )
-        assert embedding.shape == (seq_len, 1, small_config["TRANSFORMER_D_MODEL"])
+        assert embedding.shape == (seq_len, 1, small_config["GTRXL_D_MODEL"])
 
     def test_multiple_seeds_with_vmap(self, random_key, small_config):
         """Test forward pass with multiple random seeds."""
@@ -679,8 +679,8 @@ class TestVmapCompatibility:
         seq_len = 8
         obs_dim = 16
 
-        model = TransformerRepModel(config=small_config)
-        hidden = TransformerRepModel.initialize_carry(batch_size, small_config)
+        model = GTrXLRepModel(config=small_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, small_config)
 
         keys = jax.random.split(random_key, batch_size)
 
@@ -707,14 +707,14 @@ class TestVmapCompatibility:
 class TestMinibatchHandling:
     """Tests for minibatch shuffling and reshaping."""
 
-    def test_hidden_state_reshape_roundtrip(self, transformer_config):
+    def test_hidden_state_reshape_roundtrip(self, gtrxl_config):
         """Test that hidden state reshape is reversible."""
         batch_size = 8
-        d_model = transformer_config["TRANSFORMER_D_MODEL"]
-        mem_len = transformer_config["TRANSFORMER_MEM_LEN"]
+        d_model = gtrxl_config["GTRXL_D_MODEL"]
+        mem_len = gtrxl_config["GTRXL_MEM_LEN"]
 
         # Initialize carry
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         # Verify shape: (1, batch, mem_len * d_model)
         for i, h in enumerate(hidden):
@@ -734,16 +734,16 @@ class TestMinibatchHandling:
             minibatch = reshaped[:, 0, :, :]
             assert minibatch.shape == (1, minibatch_size, mem_len * d_model)
 
-    def test_minibatch_shuffling_preserves_data(self, random_key, transformer_config):
+    def test_minibatch_shuffling_preserves_data(self, random_key, gtrxl_config):
         """Test that shuffling and splitting preserves all data."""
         batch_size = 8
-        d_model = transformer_config["TRANSFORMER_D_MODEL"]
-        mem_len = transformer_config["TRANSFORMER_MEM_LEN"]
+        d_model = gtrxl_config["GTRXL_D_MODEL"]
+        mem_len = gtrxl_config["GTRXL_MEM_LEN"]
 
         # Create hidden with unique values
         hidden = [
             jax.random.normal(random_key, (1, batch_size, mem_len * d_model))
-            for _ in range(transformer_config["TRANSFORMER_N_LAYERS"])
+            for _ in range(gtrxl_config["GTRXL_N_LAYERS"])
         ]
 
         # Record original data
@@ -769,16 +769,16 @@ class TestMinibatchHandling:
 class TestCrossArchitectureCompatibility:
     """Tests for compatibility with other architectures (GRU, S5)."""
 
-    def test_output_shape_matches_gru(self, random_key, transformer_config):
+    def test_output_shape_matches_gru(self, random_key, gtrxl_config):
         """Test that Transformer output shape matches GRU."""
         batch_size = 4
         seq_len = 8
         obs_dim = 16
 
         # Transformer
-        transformer_model = TransformerRepModel(config=transformer_config)
-        transformer_hidden = TransformerRepModel.initialize_carry(
-            batch_size, transformer_config
+        transformer_model = GTrXLRepModel(config=gtrxl_config)
+        transformer_hidden = GTrXLRepModel.initialize_carry(
+            batch_size, gtrxl_config
         )
 
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
@@ -801,13 +801,13 @@ class TestCrossArchitectureCompatibility:
         assert embedding_t.shape[1] == embedding_g.shape[1], "batch_size mismatch"
         # Hidden dimensions may differ, which is acceptable
 
-    def test_hidden_state_format_compatible(self, transformer_config):
+    def test_hidden_state_format_compatible(self, gtrxl_config):
         """Test that hidden state format is compatible with minibatch handling."""
         batch_size = 4
 
         # Transformer hidden state
-        transformer_hidden = TransformerRepModel.initialize_carry(
-            batch_size, transformer_config
+        transformer_hidden = GTrXLRepModel.initialize_carry(
+            batch_size, gtrxl_config
         )
 
         # GRU hidden state
@@ -833,21 +833,21 @@ class TestCrossArchitectureCompatibility:
 class TestEndToEndIntegration:
     """End-to-end tests with ActorCritic and PPO components."""
 
-    def test_actor_critic_forward(self, random_key, transformer_config):
+    def test_actor_critic_forward(self, random_key, gtrxl_config):
         """Test forward pass through full ActorCritic with Transformer."""
         batch_size = 4
         seq_len = 8
         obs_dim = 16
         action_dim = 4
 
-        rep_model = TransformerRepModel(config=transformer_config)
+        rep_model = GTrXLRepModel(config=gtrxl_config)
         actor_critic = ActorCriticDiscrete(
-            rep_model=rep_model, action_dim=action_dim, config=transformer_config
+            rep_model=rep_model, action_dim=action_dim, config=gtrxl_config
         )
 
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         x = (obs, dones)
         params = actor_critic.init(random_key, hidden, x)
@@ -860,21 +860,21 @@ class TestEndToEndIntegration:
         # Check no NaN
         assert not jnp.any(jnp.isnan(value))
 
-    def test_actor_critic_gradient(self, random_key, transformer_config):
+    def test_actor_critic_gradient(self, random_key, gtrxl_config):
         """Test that gradients can be computed through ActorCritic."""
         batch_size = 4
         seq_len = 8
         obs_dim = 16
         action_dim = 4
 
-        rep_model = TransformerRepModel(config=transformer_config)
+        rep_model = GTrXLRepModel(config=gtrxl_config)
         actor_critic = ActorCriticDiscrete(
-            rep_model=rep_model, action_dim=action_dim, config=transformer_config
+            rep_model=rep_model, action_dim=action_dim, config=gtrxl_config
         )
 
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, transformer_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, gtrxl_config)
 
         x = (obs, dones)
         params = actor_critic.init(random_key, hidden, x)
@@ -906,14 +906,14 @@ class TestEndToEndIntegration:
         obs_dim = 16
         action_dim = 4
 
-        rep_model = TransformerRepModel(config=small_config)
+        rep_model = GTrXLRepModel(config=small_config)
         actor_critic = ActorCriticDiscrete(
             rep_model=rep_model, action_dim=action_dim, config=small_config
         )
 
         obs = jax.random.normal(random_key, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, small_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, small_config)
 
         x = (obs, dones)
         params = actor_critic.init(random_key, hidden, x)
@@ -941,7 +941,7 @@ class TestEndToEndIntegration:
         obs_dim = 16
         action_dim = 4
 
-        rep_model = TransformerRepModel(config=small_config)
+        rep_model = GTrXLRepModel(config=small_config)
         actor_critic = ActorCriticDiscrete(
             rep_model=rep_model, action_dim=action_dim, config=small_config
         )
@@ -949,7 +949,7 @@ class TestEndToEndIntegration:
         key, subkey = jax.random.split(random_key)
         obs = jax.random.normal(subkey, (seq_len, batch_size, obs_dim))
         dones = jnp.zeros((seq_len, batch_size), dtype=jnp.bool_)
-        hidden = TransformerRepModel.initialize_carry(batch_size, small_config)
+        hidden = GTrXLRepModel.initialize_carry(batch_size, small_config)
 
         x = (obs, dones)
         params = actor_critic.init(key, hidden, x)

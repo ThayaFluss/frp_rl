@@ -1,14 +1,14 @@
-# Transformer Implementation Documentation
+# GTrXL Implementation Documentation
 
-**Last Updated:** 2026-01-28
+**Last Updated:** 2026-01-29
 
-This document describes the TransformerXL implementation in frp_popjaxrl, including parameter verification results and differences from the reference implementation (transformerXL_PPO_JAX).
+This document describes the GTrXL (Gated TransformerXL) implementation in frp_popjaxrl, including parameter verification results and differences from the reference implementation (transformerXL_PPO_JAX).
 
 ---
 
 ## Overview
 
-The TransformerXL implementation in `frp_popjaxrl/algorithms/transformer.py` provides a GTrXL-style (Gated TransformerXL) architecture for use in meta-RL settings. It integrates with the existing GRU/S5 architecture pattern via `TransformerRepModel` in `frp_popjaxrl/algorithms/models.py`.
+The GTrXL implementation in `frp_popjaxrl/algorithms/gtrxl.py` provides a Gated TransformerXL architecture for use in meta-RL settings. It integrates with the existing GRU/S5 architecture pattern via `GTrXLRepModel` in `frp_popjaxrl/algorithms/models.py`.
 
 ---
 
@@ -90,7 +90,7 @@ All parameter counts have been verified to match theoretical calculations.
 
 ```
 Encoder (rep_model_0 + rep_model_1):           35,200 (1%)
-Transformer layers (×2):                    2,497,536 (95%)
+GTrXL layers (×2):                          2,497,536 (95%)
   Per-layer breakdown:
     - Attention:                              329,216
     - LayerNorm (2×):                           1,024
@@ -119,10 +119,10 @@ TOTAL:                                      2,632,197
 | S5 | 1 layer, 256 dim | 397,957 | 0.8× |
 | S5 | 2 layers, 256 dim | 661,253 | 1.3× |
 | S5 | 4 layers, 256 dim | 1,187,845 | 2.2× |
-| Transformer | 1 layer, gating OFF | 596,485 | 1.1× |
-| Transformer | 2 layers, gating OFF | 1,058,309 | 2.0× |
-| Transformer | 2 layers, gating ON | 2,632,197 | 5.0× |
-| Transformer | 4 layers, gating ON | 6,702,597 | 12.7× |
+| GTrXL | 1 layer, gating OFF | 596,485 | 1.1× |
+| GTrXL | 2 layers, gating OFF | 1,058,309 | 2.0× |
+| GTrXL | 2 layers, gating ON | 2,632,197 | 5.0× |
+| GTrXL | 4 layers, gating ON | 6,702,597 | 12.7× |
 
 **Note:** `mem_len` and `num_heads` do not affect parameter count (they are architectural hyperparameters).
 
@@ -227,32 +227,32 @@ Both implementations use `use_bias=True` for Q/K/V projections, following the re
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `TRANSFORMER_D_MODEL` | 256 | Model dimension |
-| `TRANSFORMER_NUM_HEADS` | 4 | Number of attention heads |
-| `TRANSFORMER_N_LAYERS` | 2 | Number of transformer layers |
-| `TRANSFORMER_D_FF` | d_model | Feedforward hidden dimension (following transformerXL_PPO_JAX) |
-| `TRANSFORMER_MEM_LEN` | 64 | Memory length per layer |
-| `TRANSFORMER_DROPOUT` | 0.0 | Dropout rate |
-| `TRANSFORMER_GATING` | True | Use GTrXL gating |
+| `GTRXL_D_MODEL` | 256 | Model dimension |
+| `GTRXL_NUM_HEADS` | 4 | Number of attention heads |
+| `GTRXL_N_LAYERS` | 2 | Number of GTrXL layers |
+| `GTRXL_D_FF` | d_model | Feedforward hidden dimension (following transformerXL_PPO_JAX) |
+| `GTRXL_MEM_LEN` | 64 | Memory length per layer |
+| `GTRXL_DROPOUT` | 0.0 | Dropout rate |
+| `GTRXL_GATING` | True | Use GTrXL gating |
 
 ---
 
 ## Usage Example
 
 ```python
-from frp_popjaxrl.algorithms.models import TransformerRepModel, ActorCriticDiscrete
+from frp_popjaxrl.algorithms.models import GTrXLRepModel, ActorCriticDiscrete
 
 config = {
-    "TRANSFORMER_D_MODEL": 256,
-    "TRANSFORMER_NUM_HEADS": 4,
-    "TRANSFORMER_N_LAYERS": 2,
-    "TRANSFORMER_D_FF": 256,  # d_ff = d_model (default)
-    "TRANSFORMER_MEM_LEN": 64,
-    "TRANSFORMER_DROPOUT": 0.0,
-    "TRANSFORMER_GATING": True,
+    "GTRXL_D_MODEL": 256,
+    "GTRXL_NUM_HEADS": 4,
+    "GTRXL_N_LAYERS": 2,
+    "GTRXL_D_FF": 256,  # d_ff = d_model (default)
+    "GTRXL_MEM_LEN": 64,
+    "GTRXL_DROPOUT": 0.0,
+    "GTRXL_GATING": True,
 }
 
-rep_model = TransformerRepModel(config=config)
+rep_model = GTrXLRepModel(config=config)
 network = ActorCriticDiscrete(
     rep_model=rep_model,
     action_dim=4,
@@ -273,12 +273,12 @@ new_hidden, pi, value = network.apply(params, hidden, (obs, dones))
 
 Two scripts are available for parameter verification:
 
-1. **`scripts/compare_model_params.py`** - Compare parameter counts across GRU, S5, and Transformer
-2. **`scripts/verify_transformer_params.py`** - Verify Transformer parameters against theoretical calculations
+1. **`scripts/compare_model_params.py`** - Compare parameter counts across GRU, S5, and GTrXL
+2. **`scripts/verify_gtrxl_params.py`** - Verify GTrXL parameters against theoretical calculations
 
 ```bash
 uv run python frp_popjaxrl/scripts/compare_model_params.py
-uv run python frp_popjaxrl/scripts/verify_transformer_params.py
+uv run python frp_popjaxrl/scripts/verify_gtrxl_params.py
 ```
 
 ---

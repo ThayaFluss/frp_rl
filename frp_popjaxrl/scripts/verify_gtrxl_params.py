@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Verify Transformer parameter counts against theoretical calculations.
+Verify GTrXL parameter counts against theoretical calculations.
 
 This script calculates the expected parameter counts based on the architecture
 and compares them to the actual counts from model initialization.
 
-Transformer reference: https://github.com/Reytuag/transformerXL_PPO_JAX
+GTrXL reference: https://github.com/Reytuag/transformerXL_PPO_JAX
 """
 
 import sys
@@ -17,7 +17,7 @@ import jax
 import jax.numpy as jnp
 
 
-def theoretical_transformer_params(
+def theoretical_gtrxl_params(
     obs_dim: int,
     action_dim: int,
     d_model: int,
@@ -26,7 +26,7 @@ def theoretical_transformer_params(
     d_ff: int,
     use_gating: bool,
 ) -> dict:
-    """Calculate theoretical parameter counts for TransformerRepModel + ActorCriticDiscrete."""
+    """Calculate theoretical parameter counts for GTrXLRepModel + ActorCriticDiscrete."""
 
     # Input encoder (shared with GRU/S5)
     rep_model_0 = obs_dim * 128 + 128  # Dense(128)
@@ -95,7 +95,7 @@ def theoretical_transformer_params(
     }
 
 
-def actual_transformer_params(
+def actual_gtrxl_params(
     obs_dim: int,
     action_dim: int,
     d_model: int,
@@ -105,21 +105,21 @@ def actual_transformer_params(
     use_gating: bool,
 ) -> int:
     """Get actual parameter count from model initialization."""
-    from frp_popjaxrl.algorithms.models import TransformerRepModel, ActorCriticDiscrete
+    from frp_popjaxrl.algorithms.models import GTrXLRepModel, ActorCriticDiscrete
 
     config = {
         "NUM_ENVS": 1,
         "NO_RESET": False,
-        "TRANSFORMER_D_MODEL": d_model,
-        "TRANSFORMER_NUM_HEADS": num_heads,
-        "TRANSFORMER_N_LAYERS": n_layers,
-        "TRANSFORMER_D_FF": d_ff,
-        "TRANSFORMER_MEM_LEN": 64,
-        "TRANSFORMER_DROPOUT": 0.0,
-        "TRANSFORMER_GATING": use_gating,
+        "GTRXL_D_MODEL": d_model,
+        "GTRXL_NUM_HEADS": num_heads,
+        "GTRXL_N_LAYERS": n_layers,
+        "GTRXL_D_FF": d_ff,
+        "GTRXL_MEM_LEN": 64,
+        "GTRXL_DROPOUT": 0.0,
+        "GTRXL_GATING": use_gating,
     }
 
-    rep_model = TransformerRepModel(config=config)
+    rep_model = GTrXLRepModel(config=config)
     network = ActorCriticDiscrete(rep_model=rep_model, action_dim=action_dim, config=config)
 
     batch_size = 1
@@ -134,7 +134,7 @@ def actual_transformer_params(
 
 
 def main():
-    """Verify Transformer parameter counts."""
+    """Verify GTrXL parameter counts."""
     obs_dim = 16
     action_dim = 4
 
@@ -152,17 +152,17 @@ def main():
     ]
 
     print("=" * 100)
-    print("Transformer Parameter Verification")
+    print("GTrXL Parameter Verification")
     print("=" * 100)
     print(f"{'d_model':<8} {'heads':<6} {'layers':<7} {'d_ff':<6} {'gating':<8} {'Theoretical':>14} {'Actual':>14} {'Match':<6}")
     print("-" * 100)
 
     all_match = True
     for d_model, num_heads, n_layers, d_ff, use_gating in test_cases:
-        theory = theoretical_transformer_params(
+        theory = theoretical_gtrxl_params(
             obs_dim, action_dim, d_model, num_heads, n_layers, d_ff, use_gating
         )
-        actual = actual_transformer_params(
+        actual = actual_gtrxl_params(
             obs_dim, action_dim, d_model, num_heads, n_layers, d_ff, use_gating
         )
 
@@ -184,16 +184,16 @@ def main():
 
     if all_match:
         print("\n✓ All parameter counts match theoretical calculations!")
-        print("\nTransformer implementation is CORRECT.")
+        print("\nGTrXL implementation is CORRECT.")
     else:
         print("\n✗ Some parameter counts do not match!")
-        print("\nTransformer implementation may have issues.")
+        print("\nGTrXL implementation may have issues.")
 
     # Detailed breakdown for one case
     print("\n" + "=" * 100)
     print("Detailed Breakdown (d_model=256, heads=4, layers=2, d_ff=256, gating=ON)")
     print("=" * 100)
-    breakdown = theoretical_transformer_params(obs_dim, action_dim, 256, 4, 2, 256, True)
+    breakdown = theoretical_gtrxl_params(obs_dim, action_dim, 256, 4, 2, 256, True)
     print(f"  Encoder (rep_model_0 + rep_model_1):     {breakdown['encoder']:>12,}")
     print(f"  Per-layer breakdown:")
     print(f"    - Attention:                          {breakdown['attention_per_layer']:>12,}")
@@ -201,7 +201,7 @@ def main():
     print(f"    - FeedForward:                        {breakdown['ff_per_layer']:>12,}")
     print(f"    - Gating (2x):                        {breakdown['gating_per_layer']:>12,}")
     print(f"    - Per-layer total:                    {breakdown['per_layer']:>12,}")
-    print(f"  Transformer layers (2x per-layer):      {breakdown['per_layer'] * 2:>12,}")
+    print(f"  GTrXL layers (2x per-layer):            {breakdown['per_layer'] * 2:>12,}")
     print(f"  Actor head:                             {breakdown['actor']:>12,}")
     print(f"  Critic head:                            {breakdown['critic']:>12,}")
     print(f"  ─────────────────────────────────────────────────────")
@@ -213,8 +213,8 @@ def main():
     print("Gating Effect Analysis")
     print("=" * 100)
     for n_layers in [1, 2, 4]:
-        on = theoretical_transformer_params(obs_dim, action_dim, 256, 4, n_layers, 256, True)
-        off = theoretical_transformer_params(obs_dim, action_dim, 256, 4, n_layers, 256, False)
+        on = theoretical_gtrxl_params(obs_dim, action_dim, 256, 4, n_layers, 256, True)
+        off = theoretical_gtrxl_params(obs_dim, action_dim, 256, 4, n_layers, 256, False)
         gating_total = on["gating_per_layer"] * n_layers
         ratio = on["total"] / off["total"]
         print(f"  {n_layers} layer(s): Gating adds {gating_total:,} params ({ratio:.2f}x total)")

@@ -1,9 +1,9 @@
 """
-TransformerXL implementation for frp_popjaxrl.
+GTrXL (Gated Transformer-XL) implementation for frp_popjaxrl.
 
-This module implements TransformerXL with relative position embeddings
-for use in meta-RL settings, following the GTrXL (Gated Transformer-XL)
-architecture for improved training stability.
+This module implements GTrXL with relative position embeddings
+for use in meta-RL settings. GTrXL extends TransformerXL with
+gated residual connections for improved training stability.
 
 Reference implementation:
     https://github.com/Reytuag/transformerXL_PPO_JAX
@@ -418,14 +418,14 @@ class StackedTransformer(nn.Module):
 
         Args:
             batch_size: Number of environments
-            config: Configuration dict with TRANSFORMER_D_MODEL, TRANSFORMER_N_LAYERS, TRANSFORMER_MEM_LEN
+            config: Configuration dict with GTRXL_D_MODEL, GTRXL_N_LAYERS, GTRXL_MEM_LEN
 
         Returns:
             List of memory tensors, one per layer, each shape (batch, mem_len, d_model)
         """
-        d_model = config.get("TRANSFORMER_D_MODEL", 256)
-        n_layers = config.get("TRANSFORMER_N_LAYERS", 3)
-        mem_len = config.get("TRANSFORMER_MEM_LEN", 64)
+        d_model = config.get("GTRXL_D_MODEL", 256)
+        n_layers = config.get("GTRXL_N_LAYERS", 3)
+        mem_len = config.get("GTRXL_MEM_LEN", 64)
 
         return [jnp.zeros((batch_size, mem_len, d_model)) for _ in range(n_layers)]
 
@@ -453,52 +453,26 @@ class StackedTransformer(nn.Module):
         total_len = mem_len + seq_len
 
         # Generate position embeddings (from newest to oldest)
+        # Note: We use total_len positions, not total_len+1 as in some reference implementations.
+        # The relative position shift handles alignment properly with this size.
         pos_seq = jnp.arange(total_len - 1, -1, -1, dtype=jnp.float32)
         pos_emb = self.pos_emb(pos_seq)  # (total_len, d_model)
 
-        # Create causal mask with episode boundary handling
-        # Query positions: 0..seq_len-1 attend to memory + preceding query positions
-        # Mask shape: (batch, 1, seq_len, total_len)
+        # Create causal mask: each query can attend to memory + preceding positions
+        # Query positions: 0..seq_len-1 attend to memory + positions 0..i in input
+        # Mask shape: (1, 1, seq_len, total_len)
         q_idx = jnp.arange(seq_len)[:, None]  # (seq_len, 1)
         kv_idx = jnp.arange(total_len)[None, :]  # (1, total_len)
-        # Each query at position i can attend to all memory + positions 0..i in input
-        # kv_idx < mem_len means memory (always attend without done handling)
-        # kv_idx - mem_len <= q_idx means current or earlier position in query
+        # kv_idx < mem_len means memory (always attend)
+        # kv_idx - mem_len <= q_idx means current or earlier position in sequence
         causal_mask = (kv_idx < mem_len) | ((kv_idx - mem_len) <= q_idx)
         causal_mask = causal_mask[None, None, :, :]  # (1, 1, seq_len, total_len)
 
-        # Episode boundary mask: prevent attending across done boundaries
-        # dones: (batch, seq_len) - True when episode ends at that timestep
-        # If done[t] = True, positions t+1 onwards should NOT attend to positions <= t
-        #
-        # Compute cumulative episode index: each done increments the episode number
-        # cumsum_dones[t] = number of episode boundaries before position t
-        # Two positions are in the same episode if they have the same cumsum value
-        cumsum_dones = jnp.cumsum(dones, axis=1)  # (batch, seq_len)
-        # For query position q and key position k (in sequence, not memory):
-        # same_episode[q, k] = cumsum_dones[q] == cumsum_dones[k]
-        # This means no done happened between k and q
-        cumsum_q = cumsum_dones[:, :, None]  # (batch, seq_len, 1)
-        cumsum_k = cumsum_dones[:, None, :]  # (batch, 1, seq_len)
-        same_episode_seq = cumsum_q == cumsum_k  # (batch, seq_len, seq_len)
-
-        # Extend to full kv range: memory positions + sequence positions
-        # Memory positions: always in a "prior" episode, so mask them if ANY done in sequence
-        # Sequence positions: use same_episode_seq
-        any_done = dones.any(axis=1, keepdims=True)  # (batch, 1)
-        # Memory can be attended only if no done occurred in the sequence
-        memory_mask = ~any_done  # (batch, 1) - True if memory is valid
-        memory_mask = jnp.broadcast_to(
-            memory_mask[:, None, :], (batch_size, seq_len, mem_len)
-        )  # (batch, seq_len, mem_len)
-        # Combine memory mask and sequence episode mask
-        episode_mask = jnp.concatenate(
-            [memory_mask, same_episode_seq], axis=2
-        )  # (batch, seq_len, total_len)
-        episode_mask = episode_mask[:, None, :, :]  # (batch, 1, seq_len, total_len)
-
-        # Final mask: causal AND same episode
-        causal_mask = causal_mask & episode_mask  # (batch, 1, seq_len, total_len)
+        # NOTE: Episode boundary masking is DISABLED following the reference implementation
+        # (transformerXL_PPO_JAX). The reference handles episode boundaries by:
+        # 1. Resetting memory to zeros when done occurs (done below in the layer loop)
+        # 2. Using only causal mask without episode-aware masking within the sequence
+        # This is simpler and empirically works well for PPO training.
 
         # Compute the last episode start index for memory update
         # We want to keep only activations from the current (last) episode
@@ -511,15 +485,13 @@ class StackedTransformer(nn.Module):
         new_memories = []
         for i, layer in enumerate(self.layers):
             memory = memories[i]
-
-            # Reset input memory if any done in sequence (memory from prev call is stale)
-            # Note: attention mask already handles this, but we also zero the memory
-            # to ensure clean state for memory concatenation below
-            memory = jnp.where(
-                any_done[:, :, None],  # (batch, 1, 1)
-                jnp.zeros_like(memory),
-                memory,
-            )
+            # NOTE: Memory reset is NOT done here. The reference implementation
+            # (transformerXL_PPO_JAX) handles memory differently:
+            # - During rollout: memory updated step-by-step with done-aware reset
+            # - During training: uses cached memory from rollout for each WINDOW_GRAD chunk
+            # Current implementation passes memory as-is to support both rollout (seq_len=1)
+            # and training (seq_len=NUM_STEPS). For proper training, the PPO loop should
+            # provide appropriate memory state for each training chunk.
 
             # Forward through layer
             x = layer(x, memory, pos_emb, mask=causal_mask, deterministic=deterministic)

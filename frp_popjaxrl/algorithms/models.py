@@ -20,7 +20,7 @@ from typing import Sequence, Dict, Any
 import distrax
 from gymnax.environments import spaces
 from .s5 import StackedEncoderModel
-from .transformer import StackedTransformer
+from .gtrxl import StackedTransformer
 
 
 class GRUCore(nn.Module):
@@ -244,17 +244,17 @@ class S5RepModel(nn.Module):
         return hidden, embedding
 
 
-class TransformerRepModel(nn.Module):
+class GTrXLRepModel(nn.Module):
     """
-    Transformer-based encoder for ActorCritic networks.
+    GTrXL-based encoder for ActorCritic networks.
 
-    This encoder handles sequence encoding using TransformerXL with
-    relative position attention and optional GTrXL gating.
+    This encoder handles sequence encoding using GTrXL (Gated TransformerXL)
+    with relative position attention and optional gating.
 
     Hidden State Format (compatible with GRU/S5):
         List of memory tensors, each with shape (1, batch, mem_len * d_model)
         The leading 1 is for compatibility with minibatch shuffling.
-        Internally reshaped to (batch, mem_len, d_model) for transformer processing.
+        Internally reshaped to (batch, mem_len, d_model) for GTrXL processing.
     """
 
     config: Dict
@@ -262,18 +262,18 @@ class TransformerRepModel(nn.Module):
     @staticmethod
     def initialize_carry(batch_size, config):
         """
-        Initialize Transformer memory state.
+        Initialize GTrXL memory state.
 
         Args:
             batch_size: Number of environments
-            config: Configuration dict with TRANSFORMER_* parameters
+            config: Configuration dict with GTRXL_* parameters
 
         Returns:
             List of memory tensors, one per layer, each shape (1, batch, mem_len * d_model)
         """
-        d_model = config.get("TRANSFORMER_D_MODEL", 256)
-        n_layers = config.get("TRANSFORMER_N_LAYERS", 2)
-        mem_len = config.get("TRANSFORMER_MEM_LEN", 64)
+        d_model = config.get("GTRXL_D_MODEL", 256)
+        n_layers = config.get("GTRXL_N_LAYERS", 2)
+        mem_len = config.get("GTRXL_MEM_LEN", 64)
 
         # Shape: (1, batch, mem_len * d_model) - compatible with GRU/S5 minibatch handling
         # The leading 1 allows axis=1 (batch) to be shuffled/reshaped in create_minibatches
@@ -283,31 +283,31 @@ class TransformerRepModel(nn.Module):
         ]
 
     def setup(self):
-        """Setup Transformer encoder layers."""
+        """Setup GTrXL encoder layers."""
         # Input encoder layers (same as GRU/S5)
         self.rep_model_0 = nn.Dense(
             128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )
         self.rep_model_1 = nn.Dense(
-            self.config.get("TRANSFORMER_D_MODEL", 256),
+            self.config.get("GTRXL_D_MODEL", 256),
             kernel_init=orthogonal(np.sqrt(2)),
             bias_init=constant(0.0)
         )
 
-        # Stacked Transformer
+        # Stacked GTrXL
         self.transformer = StackedTransformer(
-            d_model=self.config.get("TRANSFORMER_D_MODEL", 256),
-            num_heads=self.config.get("TRANSFORMER_NUM_HEADS", 4),
-            n_layers=self.config.get("TRANSFORMER_N_LAYERS", 2),
-            d_ff=self.config.get("TRANSFORMER_D_FF", None),
-            mem_len=self.config.get("TRANSFORMER_MEM_LEN", 64),
-            dropout_rate=self.config.get("TRANSFORMER_DROPOUT", 0.0),
-            use_gating=self.config.get("TRANSFORMER_GATING", True),
+            d_model=self.config.get("GTRXL_D_MODEL", 256),
+            num_heads=self.config.get("GTRXL_NUM_HEADS", 4),
+            n_layers=self.config.get("GTRXL_N_LAYERS", 2),
+            d_ff=self.config.get("GTRXL_D_FF", None),
+            mem_len=self.config.get("GTRXL_MEM_LEN", 64),
+            dropout_rate=self.config.get("GTRXL_DROPOUT", 0.0),
+            use_gating=self.config.get("GTRXL_GATING", True),
         )
 
     def __call__(self, hidden, obs, dones):
         """
-        Encode observations using Transformer.
+        Encode observations using GTrXL.
 
         Args:
             hidden: List of memory tensors per layer, each (1, batch, mem_len * d_model)
@@ -320,8 +320,8 @@ class TransformerRepModel(nn.Module):
         if self.config.get("NO_RESET"):
             dones = jnp.zeros_like(dones)
 
-        d_model = self.config.get("TRANSFORMER_D_MODEL", 256)
-        mem_len = self.config.get("TRANSFORMER_MEM_LEN", 64)
+        d_model = self.config.get("GTRXL_D_MODEL", 256)
+        mem_len = self.config.get("GTRXL_MEM_LEN", 64)
 
         # Input shape: (seq_len, batch, obs_dim) - frp_popjaxrl convention
         # Transformer expects: (batch, seq_len, dim)

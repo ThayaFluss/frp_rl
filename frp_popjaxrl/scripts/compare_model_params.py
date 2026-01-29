@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Compare parameter counts across GRU, S5, and Transformer architectures.
+Compare parameter counts across GRU, S5, and GTrXL architectures.
 
 This script creates models with various configurations and counts their parameters,
 outputting a formatted comparison table.
 
-Transformer reference: https://github.com/Reytuag/transformerXL_PPO_JAX
+GTrXL reference: https://github.com/Reytuag/transformerXL_PPO_JAX
 """
 
 import sys
@@ -48,14 +48,14 @@ class ModelConfig:
             "S5_DO_NORM": False,
             "S5_PRENORM": False,
             "S5_DO_GTRXL_NORM": False,
-            # Transformer settings (d_ff = d_model following transformerXL_PPO_JAX)
-            "TRANSFORMER_D_MODEL": self.dim,
-            "TRANSFORMER_NUM_HEADS": self.heads if self.heads else 4,
-            "TRANSFORMER_N_LAYERS": self.layers,
-            "TRANSFORMER_D_FF": self.dim,  # d_ff = d_model, following transformerXL_PPO_JAX
-            "TRANSFORMER_MEM_LEN": self.mem_len if self.mem_len else 64,
-            "TRANSFORMER_DROPOUT": 0.0,
-            "TRANSFORMER_GATING": self.gating if self.gating is not None else True,
+            # GTrXL settings (d_ff = d_model following transformerXL_PPO_JAX)
+            "GTRXL_D_MODEL": self.dim,
+            "GTRXL_NUM_HEADS": self.heads if self.heads else 4,
+            "GTRXL_N_LAYERS": self.layers,
+            "GTRXL_D_FF": self.dim,  # d_ff = d_model, following transformerXL_PPO_JAX
+            "GTRXL_MEM_LEN": self.mem_len if self.mem_len else 64,
+            "GTRXL_DROPOUT": 0.0,
+            "GTRXL_GATING": self.gating if self.gating is not None else True,
         }
         return config
 
@@ -79,7 +79,7 @@ def create_and_count_params(
     from frp_popjaxrl.algorithms.models import (
         GRURepModel,
         S5RepModel,
-        TransformerRepModel,
+        GTrXLRepModel,
         ActorCriticDiscrete,
     )
 
@@ -90,8 +90,8 @@ def create_and_count_params(
         rep_model = GRURepModel(config=config)
     elif model_config.arch == "S5":
         rep_model = S5RepModel(config=config)
-    elif model_config.arch == "Transformer":
-        rep_model = TransformerRepModel(config=config)
+    elif model_config.arch == "GTrXL":
+        rep_model = GTrXLRepModel(config=config)
     else:
         raise ValueError(f"Unknown architecture: {model_config.arch}")
 
@@ -136,13 +136,13 @@ def main():
     for layers in [1, 2, 4]:
         configs.append(ModelConfig(arch="S5", layers=layers, dim=256))
 
-    # 3. Transformer configurations
+    # 3. GTrXL configurations
     # Layer comparison with gating ON/OFF (dim=256, mem_len=64, heads=4)
     for layers in [1, 2, 4]:
         for gating in [True, False]:
             configs.append(
                 ModelConfig(
-                    arch="Transformer",
+                    arch="GTrXL",
                     layers=layers,
                     dim=256,
                     mem_len=64,
@@ -156,7 +156,7 @@ def main():
         heads = max(2, dim // 64)  # Ensure divisibility
         configs.append(
             ModelConfig(
-                arch="Transformer",
+                arch="GTrXL",
                 layers=2,
                 dim=dim,
                 mem_len=64,
@@ -206,14 +206,14 @@ def main():
     # Group by category
     gru_results = [(c, p) for c, p in results if c.arch == "GRU"]
     s5_results = [(c, p) for c, p in results if c.arch == "S5"]
-    transformer_results = [(c, p) for c, p in results if c.arch == "Transformer"]
+    transformer_results = [(c, p) for c, p in results if c.arch == "GTrXL"]
 
     print(f"\nGRU (baseline): {gru_results[0][1]:,} params")
 
     print(f"\nS5 range: {min(p for _, p in s5_results):,} - {max(p for _, p in s5_results):,} params")
     print(f"  vs GRU: {min(p for _, p in s5_results) / gru_params:.1f}x - {max(p for _, p in s5_results) / gru_params:.1f}x")
 
-    print(f"\nTransformer range: {min(p for _, p in transformer_results):,} - {max(p for _, p in transformer_results):,} params")
+    print(f"\nGTrXL range: {min(p for _, p in transformer_results):,} - {max(p for _, p in transformer_results):,} params")
     print(f"  vs GRU: {min(p for _, p in transformer_results) / gru_params:.1f}x - {max(p for _, p in transformer_results) / gru_params:.1f}x")
 
     # Gating effect

@@ -334,6 +334,14 @@ def make_train(config):
 
                     def _loss_fn(params, init_hstate, traj_batch, gae, targets):
                         # RERUN NETWORK
+                        # For Transformer: always start from fresh memory to avoid
+                        # minibatch shuffling issues (where env A's obs gets env B's memory).
+                        # GRU/S5 recompute hidden state from trajectory anyway, so this is
+                        # consistent behavior across all architectures.
+                        if model_type == "transformer":
+                            # traj_batch.obs shape: (seq_len, batch_size, obs_dim)
+                            batch_size = traj_batch.obs.shape[1]
+                            init_hstate = network.initialize_core_hidden_state(batch_size)
                         _, pi, value = network.apply(params, init_hstate, (traj_batch.obs, traj_batch.done))
                         log_prob = pi.log_prob(traj_batch.action)
 

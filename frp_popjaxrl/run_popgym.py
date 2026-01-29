@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import time
 from envs import make
 from envs.wrappers import AliasPrevActionV2
-from algorithms.ppo_gru_in_context import make_train as make_train_gru
+from algorithms.ppo_gru_origin import make_train as make_train_gru
 from algorithms.ppo_s5_origin import make_train as make_train_s5
 import argparse
 #from envs.environments.meta_cartpole import NoisyStatelessMetaCartPole, MetaEnvParams

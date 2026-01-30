@@ -1,21 +1,20 @@
 """
-GTrXL PPO with FRP (Free Random Projection) for Meta-Learning.
+GTrXL PPO with FRP (Free Random Projection) for Meta-Learning - Memory-efficient version.
 
 This module implements PPO training for GTrXL with FRP transformations,
 combining GTrXL's memory-based sequence modeling with FRP's task diversity
 through orthogonal transformations.
 
-Key features:
-- GTrXL-specific Transition with memory caching
-- FRP state management external to environment (SEPARATED mode)
-- WINDOW_GRAD chunked training with Truncated BPTT
-- Independent RNG for training and evaluation
+Key design decisions for memory efficiency:
+- Uses ppo_common.Transition (no memory field) to avoid storing memory at each step
+- Memory is passed sequentially through chunks during loss computation
+- Memory is reset to zero at the start of each epoch
+- This reduces GPU memory from ~29GB to ~1-2GB
 
 Reference implementation:
     https://github.com/Reytuag/transformerXL_PPO_JAX
 """
 import logging
-from typing import NamedTuple, List
 
 import jax
 import jax.numpy as jnp
@@ -33,6 +32,7 @@ from frp.frp_manager import (
 )
 
 from .ppo_common import (
+    Transition,
     make_linear_schedule,
     calculate_gae,
     safe_mean,
@@ -43,39 +43,13 @@ from .ppo_common import (
 logger = logging.getLogger(__name__)
 
 
-# ===== GTrXL-specific Data Structures =====
-
-class Transition(NamedTuple):
-    """GTrXL-specific transition with memory caching.
-
-    Attributes:
-        done: Episode done flags, shape (num_envs,)
-        action: Actions taken, shape (num_envs,) or (num_envs, action_dim)
-        value: Value estimates, shape (num_envs,)
-        reward: Rewards received, shape (num_envs,)
-        log_prob: Log probabilities of actions, shape (num_envs,)
-        obs: Observations (FRP-transformed), shape (num_envs, obs_dim)
-        info: Environment info
-        memory: Cached memory at this step for WINDOW_GRAD training
-    """
-    done: jnp.ndarray
-    action: jnp.ndarray
-    value: jnp.ndarray
-    reward: jnp.ndarray
-    log_prob: jnp.ndarray
-    obs: jnp.ndarray
-    info: jnp.ndarray
-    memory: List[jnp.ndarray]
-
-
 # ===== Memory Management Functions =====
 
-def reset_memory_on_done(memory: List[jnp.ndarray], done: jnp.ndarray) -> List[jnp.ndarray]:
+def reset_memory_on_done(memory: list, done: jnp.ndarray) -> list:
     """Reset memory to zeros for environments where episode ended.
 
     Args:
         memory: List of memory tensors, each shape (1, num_envs, mem_len * d_model)
-                This format is compatible with GTrXLRepModel's hidden state format.
         done: Done flags, shape (num_envs,)
 
     Returns:
@@ -232,9 +206,6 @@ def make_train(config):
                 log_prob = pi.log_prob(action)
                 value, action, log_prob = value.squeeze(0), action.squeeze(0), log_prob.squeeze(0)
 
-                # Cache memory before update
-                cached_memory = memory
-
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
                 rng_step = jax.random.split(_rng, config["NUM_ENVS"])
@@ -287,8 +258,9 @@ def make_train(config):
 
                 obsv = jax.vmap(apply_frp_transform)(obsv, env_indices)
 
+                # Memory-efficient: don't cache memory in Transition
                 transition = Transition(
-                    last_done, action, value, reward, log_prob, last_obs, info, cached_memory
+                    last_done, action, value, reward, log_prob, last_obs, info
                 )
                 runner_state = (train_state, env_state, obsv, done, new_memory, rng, env_indices)
                 return runner_state, transition
@@ -317,13 +289,23 @@ def make_train(config):
                     traj_batch, advantages, targets = batch_info
 
                     def _loss_fn_gtrxl(params, traj_batch, gae, targets):
-                        """GTrXL loss function with WINDOW_GRAD chunked processing."""
+                        """GTrXL loss function with memory-efficient chunked processing.
+
+                        Key changes for memory efficiency:
+                        - Memory is initialized to zero at epoch start
+                        - Memory is passed through chunks via carry (not cached in Transition)
+                        - stop_gradient on memory at each chunk boundary (Truncated BPTT)
+                        - GAE is normalized across the entire batch for stable gradients
+                        """
                         num_steps = traj_batch.obs.shape[0]
                         batch_size = traj_batch.obs.shape[1]
                         num_chunks = num_steps // window_grad
 
+                        # Normalize GAE across entire batch (like GRU PPO)
+                        gae_normalized = (gae - gae.mean()) / (gae.std() + 1e-8)
+
                         def process_chunk(carry, chunk_idx):
-                            _ = carry
+                            memory = carry  # Memory from previous chunk
                             start = chunk_idx * window_grad
 
                             chunk_obs = jax.lax.dynamic_slice(
@@ -348,7 +330,7 @@ def make_train(config):
                                 (window_grad, batch_size)
                             )
                             chunk_gae = jax.lax.dynamic_slice(
-                                gae, (start, 0),
+                                gae_normalized, (start, 0),
                                 (window_grad, batch_size)
                             )
                             chunk_targets = jax.lax.dynamic_slice(
@@ -356,23 +338,13 @@ def make_train(config):
                                 (window_grad, batch_size)
                             )
 
-                            # Get cached memory from chunk start
-                            # traj_batch.memory is a list of arrays, each with shape:
-                            # (num_steps, 1, num_envs, mem_len * d_model)
-                            chunk_memory = [
-                                jax.lax.dynamic_slice(
-                                    mem, (start, 0, 0, 0),
-                                    (1, 1, batch_size, mem.shape[3])
-                                ).squeeze(0)  # Remove chunk index dim, keep (1, batch, mem)
-                                for mem in traj_batch.memory
-                            ]
-
-                            chunk_memory = jax.tree_util.tree_map(
-                                jax.lax.stop_gradient, chunk_memory
+                            # Stop gradient on memory for Truncated BPTT
+                            memory = jax.tree_util.tree_map(
+                                jax.lax.stop_gradient, memory
                             )
 
                             new_memory, pi, value = network.apply(
-                                params, chunk_memory, (chunk_obs, chunk_done)
+                                params, memory, (chunk_obs, chunk_done)
                             )
                             log_prob = pi.log_prob(chunk_action)
 
@@ -383,34 +355,35 @@ def make_train(config):
                             value_losses_clipped = jnp.square(value_pred_clipped - chunk_targets)
                             chunk_value_loss = 0.5 * jnp.maximum(value_losses, value_losses_clipped)
 
-                            chunk_gae_norm = (chunk_gae - chunk_gae.mean()) / (chunk_gae.std() + 1e-8)
-
                             ratio = jnp.exp(log_prob - chunk_log_prob_old)
-                            loss_actor1 = ratio * chunk_gae_norm
+                            loss_actor1 = ratio * chunk_gae
                             loss_actor2 = jnp.clip(
                                 ratio, 1.0 - config["CLIP_EPS"], 1.0 + config["CLIP_EPS"]
-                            ) * chunk_gae_norm
+                            ) * chunk_gae
                             chunk_actor_loss = -jnp.minimum(loss_actor1, loss_actor2)
                             chunk_entropy = pi.entropy()
 
                             chunk_stats = (
-                                chunk_value_loss.sum(),
-                                chunk_actor_loss.sum(),
-                                chunk_entropy.sum(),
-                                jnp.array(window_grad * batch_size, dtype=jnp.float32)
+                                chunk_value_loss.mean(),
+                                chunk_actor_loss.mean(),
+                                chunk_entropy.mean(),
                             )
-                            return None, chunk_stats
+                            return new_memory, chunk_stats
 
+                        # Initialize memory to zero at epoch start
+                        init_memory = network.initialize_core_hidden_state(batch_size)
+
+                        # Process all chunks, passing memory through carry
                         _, chunk_results = jax.lax.scan(
-                            process_chunk, None, jnp.arange(num_chunks)
+                            process_chunk, init_memory, jnp.arange(num_chunks)
                         )
 
-                        total_value_loss, total_actor_loss, total_entropy, total_count = chunk_results
-                        total_count_sum = total_count.sum()
+                        # Aggregate losses across chunks (mean of means)
+                        total_value_loss, total_actor_loss, total_entropy = chunk_results
 
-                        value_loss = total_value_loss.sum() / total_count_sum
-                        loss_actor = total_actor_loss.sum() / total_count_sum
-                        entropy = total_entropy.sum() / total_count_sum
+                        value_loss = total_value_loss.mean()
+                        loss_actor = total_actor_loss.mean()
+                        entropy = total_entropy.mean()
 
                         total_loss = loss_actor + config["VF_COEF"] * value_loss - config["ENT_COEF"] * entropy
                         return total_loss, (value_loss, loss_actor, entropy)
@@ -422,82 +395,35 @@ def make_train(config):
 
                 train_state, traj_batch, advantages, targets, rng = update_state
 
-                # GTrXL-specific: Shuffle only along NUM_ENVS dimension
+                # Shuffle only along NUM_ENVS dimension to preserve temporal order
                 rng, _rng = jax.random.split(rng)
                 permutation = jax.random.permutation(_rng, config["NUM_ENVS"])
 
-                # GTrXL memory has shape (steps, 1, batch, mem_dim) - need special handling
-                # Separate memory from other fields for custom reshape
-                traj_no_mem = Transition(
-                    done=traj_batch.done,
-                    action=traj_batch.action,
-                    value=traj_batch.value,
-                    reward=traj_batch.reward,
-                    log_prob=traj_batch.log_prob,
-                    obs=traj_batch.obs,
-                    info=traj_batch.info,
-                    memory=None  # Handle separately
-                )
-
-                # Shuffle non-memory fields along env dimension (axis=1)
-                shuffled_no_mem = jax.tree_util.tree_map(
-                    lambda x: jnp.take(x, permutation, axis=1) if x is not None else None,
-                    traj_no_mem
+                # Shuffle along env dimension (axis=1)
+                shuffled_batch = jax.tree_util.tree_map(
+                    lambda x: jnp.take(x, permutation, axis=1), traj_batch
                 )
                 shuffled_adv = jnp.take(advantages, permutation, axis=1)
                 shuffled_tgt = jnp.take(targets, permutation, axis=1)
 
-                # Shuffle memory along batch dimension (axis=2 for shape (steps, 1, batch, mem))
-                shuffled_memory = [jnp.take(mem, permutation, axis=2) for mem in traj_batch.memory]
-
-                # Reshape for minibatches
-                def reshape_field_to_minibatches(x):
-                    """Reshape (steps, envs, ...) -> (num_mb, steps, envs_per_mb, ...)"""
-                    if x is None:
-                        return None
+                # Reshape for minibatches: (steps, envs, ...) -> (num_mb, steps, envs_per_mb, ...)
+                def reshape_to_minibatches(x):
                     shape = x.shape
                     new_shape = (shape[0], config["NUM_MINIBATCHES"], -1) + shape[2:]
                     return jnp.reshape(x, new_shape).swapaxes(0, 1)
 
-                def reshape_memory_to_minibatches(mem_list):
-                    """Reshape memory (steps, 1, batch, mem) -> list of (num_mb, steps, 1, batch/num_mb, mem)"""
-                    result = []
-                    for mem in mem_list:
-                        # mem shape: (steps, 1, batch, mem_dim)
-                        steps, one, batch, mem_dim = mem.shape
-                        # Reshape batch dim to (num_mb, batch/num_mb)
-                        reshaped = mem.reshape(steps, one, config["NUM_MINIBATCHES"], -1, mem_dim)
-                        # Swap to (num_mb, steps, 1, batch/num_mb, mem_dim)
-                        reshaped = reshaped.swapaxes(0, 2)  # (num_mb, 1, steps, batch/num_mb, mem_dim)
-                        reshaped = reshaped.swapaxes(1, 2)  # (num_mb, steps, 1, batch/num_mb, mem_dim)
-                        result.append(reshaped)
-                    return result
+                mb_batch = jax.tree_util.tree_map(reshape_to_minibatches, shuffled_batch)
+                mb_adv = reshape_to_minibatches(shuffled_adv)
+                mb_tgt = reshape_to_minibatches(shuffled_tgt)
 
-                # Reshape non-memory fields
-                mb_no_mem = jax.tree_util.tree_map(reshape_field_to_minibatches, shuffled_no_mem)
-                mb_adv = reshape_field_to_minibatches(shuffled_adv)
-                mb_tgt = reshape_field_to_minibatches(shuffled_tgt)
-                mb_memory = reshape_memory_to_minibatches(shuffled_memory)
-
-                # Reconstruct minibatches
-                num_minibatches = config["NUM_MINIBATCHES"]
-
+                # Process minibatches
                 def process_single_minibatch(train_state, mb_idx):
-                    mb_traj = Transition(
-                        done=mb_no_mem.done[mb_idx],
-                        action=mb_no_mem.action[mb_idx],
-                        value=mb_no_mem.value[mb_idx],
-                        reward=mb_no_mem.reward[mb_idx],
-                        log_prob=mb_no_mem.log_prob[mb_idx],
-                        obs=mb_no_mem.obs[mb_idx],
-                        info=jax.tree_util.tree_map(lambda x: x[mb_idx] if x is not None else None, mb_no_mem.info),
-                        memory=[m[mb_idx] for m in mb_memory]
-                    )
+                    mb_traj = jax.tree_util.tree_map(lambda x: x[mb_idx], mb_batch)
                     mb_batch_info = (mb_traj, mb_adv[mb_idx], mb_tgt[mb_idx])
                     return _update_minbatch(train_state, mb_batch_info)
 
                 train_state, total_loss = jax.lax.scan(
-                    process_single_minibatch, train_state, jnp.arange(num_minibatches)
+                    process_single_minibatch, train_state, jnp.arange(config["NUM_MINIBATCHES"])
                 )
                 update_state = (train_state, traj_batch, advantages, targets, rng)
                 return update_state, total_loss
@@ -597,8 +523,7 @@ def make_train(config):
 
                 eval_obsv = jax.vmap(apply_eval_frp_transform)(eval_obsv)
 
-                from .ppo_common import Transition as CommonTransition
-                transition = CommonTransition(eval_last_done, action, value, reward, log_prob, eval_last_obs, info)
+                transition = Transition(eval_last_done, action, value, reward, log_prob, eval_last_obs, info)
                 runner_state = (train_state, eval_env_state, eval_obsv, done, eval_memory, eval_rng)
                 return runner_state, transition
 

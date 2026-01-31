@@ -37,18 +37,23 @@ logger = logging.getLogger(__name__)
 def get_make_train(arch: str):
     """Get the appropriate make_train function based on architecture.
 
-    AGaLiTe uses its own self-contained PPO module (ppo_agalite.py),
-    while GRU/S5 use the standard PPO module (ppo_standard.py).
+    All architectures (GRU, S5, AGaLiTe) use the unified ppo_standard.py module.
+    AGaLiTeRepModel has been added to models.py with the same interface as
+    GRURepModel/S5RepModel.
+
+    The legacy AGaLiTe implementation (ppo_agalite.py) can be accessed via
+    'agalite_legacy' for comparison purposes.
 
     Args:
-        arch: Architecture name ('gru', 's5', or 'agalite')
+        arch: Architecture name ('gru', 's5', 'agalite', or 'agalite_legacy')
 
     Returns:
         make_train function for the specified architecture
     """
-    if arch.lower() == "agalite":
+    if arch.lower() == "agalite_legacy":
         from algorithms.ppo_agalite import make_train
     else:
+        # All architectures (gru, s5, agalite) use the unified ppo_standard.py
         from algorithms.ppo_standard import make_train
     return make_train
 
@@ -298,8 +303,9 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
             "time/total_time": total_rnn_time,
         })
 
-    elif arch == "agalite":
-        logger.info("Starting AGaLiTe compilation...")
+    elif arch in ("agalite", "agalite_legacy"):
+        arch_label = "AGaLiTe" if arch == "agalite" else "AGaLiTe (Legacy)"
+        logger.info(f"Starting {arch_label} compilation...")
         train_vjit_agalite = jax.jit(jax.vmap(make_train(config)))
 
         # Start JAX profiler for compilation analysis (if enabled)
@@ -316,20 +322,20 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
             jax.profiler.stop_trace()
             logger.info("JAX profiler trace saved to /tmp/jax-trace")
 
-        logger.info(f"AGaLiTe compilation completed in {compile_agalite_time:.2f}s")
+        logger.info(f"{arch_label} compilation completed in {compile_agalite_time:.2f}s")
 
-        logger.info("Starting AGaLiTe training execution...")
+        logger.info(f"Starting {arch_label} training execution...")
         t0 = time.time()
         out_agalite = jax.block_until_ready(compiled_agalite(rngs))
         run_agalite_time = time.time() - t0
-        logger.info(f"AGaLiTe training completed in {run_agalite_time:.2f}s")
+        logger.info(f"{arch_label} training completed in {run_agalite_time:.2f}s")
 
         # Calculate total time
         total_agalite_time = compile_agalite_time + run_agalite_time
 
         # Display summary
         logger.info("=" * 50)
-        logger.info("AGaLiTe Training Summary:")
+        logger.info(f"{arch_label} Training Summary:")
         logger.info(f"  Compile time:  {compile_agalite_time:>8.2f}s")
         logger.info(f"  Training time: {run_agalite_time:>8.2f}s")
         logger.info(f"  Total time:    {total_agalite_time:>8.2f}s")
@@ -342,7 +348,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
         )
 
         # Create base info dictionary with common metrics
-        info_dict["agalite"] = {
+        info_dict[arch] = {
             "compile_agalite_time": compile_agalite_time,
             "run_agalite_time": run_agalite_time,
             "total_agalite_time": total_agalite_time,
@@ -358,7 +364,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
         })
 
     else:
-        raise NotImplementedError(f"Unknown architecture: {arch}. Valid values are 'gru', 's5', or 'agalite'.")
+        raise NotImplementedError(f"Unknown architecture: {arch}. Valid values are 'gru', 's5', 'agalite', or 'agalite_legacy'.")
 
     if args.save_results == 1:
         jnp.save(f"results/{num_runs}_{env_name}_{arch}_{file_tag}.npy", info_dict)
@@ -373,7 +379,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
             runner_state = out_s5[0]
         elif arch == "gru":
             runner_state = out_rnn[0]
-        elif arch == "agalite":
+        elif arch in ("agalite", "agalite_legacy"):
             runner_state = out_agalite[0]
 
         # Get the first run's state (in case of multiple runs)
@@ -450,7 +456,7 @@ if __name__ == "__main__":
     parser.add_argument("--env", type=str, default="StatelessCartPoleEasy",
                         help="Environment name (default: %(default)s)")
     parser.add_argument("--arch", type=str, default="gru",
-                        help="Architecture: gru, s5, or agalite (default: %(default)s)")
+                        help="Architecture: gru, s5, agalite, or agalite_legacy (default: %(default)s)")
     parser.add_argument("--log_wandb", type=str, default="popgym_standard",
                         help="Wandb project name (default: %(default)s)")
     parser.add_argument("--debug", type=int, default=0,

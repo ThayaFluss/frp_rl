@@ -20,6 +20,7 @@ from typing import Sequence, Dict, Any
 import distrax
 from gymnax.environments import spaces
 from .s5 import StackedEncoderModel
+from .agalite import BatchedAGaLiTe
 
 
 class GRUCore(nn.Module):
@@ -241,6 +242,99 @@ class S5RepModel(nn.Module):
         hidden, embedding = self.s5(hidden, embedding, dones)
 
         return hidden, embedding
+
+
+class AGaLiTeRepModel(nn.Module):
+    """
+    AGaLiTe-based encoder following RepModel interface.
+
+    Key: Hidden state format is (1, batch, ...) to match GRU/S5,
+    enabling use with ppo_standard.py without modifications.
+
+    The format conversion:
+    - initialize_carry: returns (1, batch, ...) format
+    - __call__ entry: converts (1, batch, ...) -> (batch, ...) via squeeze(0)
+    - __call__ exit: converts (batch, ...) -> (1, batch, ...) via x[None, :]
+    """
+
+    config: Dict
+
+    def setup(self):
+        """Setup AGaLiTe module."""
+        self.agalite = BatchedAGaLiTe(
+            n_layers=self.config.get("AGALITE_N_LAYERS", 4),
+            d_model=self.config.get("AGALITE_D_MODEL", 64),
+            d_head=self.config.get("AGALITE_D_HEAD", 64),
+            d_ffc=self.config.get("AGALITE_D_FFC", 64),
+            n_heads=self.config.get("AGALITE_N_HEADS", 4),
+            eta=self.config.get("AGALITE_ETA", 4),
+            r=self.config.get("AGALITE_R", 2),
+            reset_on_terminate=True
+        )
+
+    @staticmethod
+    def initialize_carry(batch_size, config) -> dict:
+        """
+        Initialize AGaLiTe memory state with leading 1 dimension.
+
+        This matches GRU/S5 format: (1, batch, ...)
+
+        Args:
+            batch_size: Number of environments
+            config: Configuration dict containing AGaLiTe parameters
+
+        Returns:
+            Initial memory state with format (1, batch, ...)
+        """
+        import jax
+        memory = BatchedAGaLiTe.initialize_carry(
+            batch_size=batch_size,
+            n_layers=config.get("AGALITE_N_LAYERS", 4),
+            n_heads=config.get("AGALITE_N_HEADS", 4),
+            d_head=config.get("AGALITE_D_HEAD", 64),
+            eta=config.get("AGALITE_ETA", 4),
+            r=config.get("AGALITE_R", 2)
+        )
+        # Add leading 1 to match GRU/S5 format: (batch, ...) -> (1, batch, ...)
+        return jax.tree_map(lambda x: x[None, :], memory)
+
+    @nn.compact
+    def __call__(self, hidden, obs, dones):
+        """
+        Encode observations using AGaLiTe.
+
+        Args:
+            hidden: Memory state with format (1, batch, ...) for GRU/S5 compatibility
+            obs: Observations [seq_len, batch, obs_dim]
+            dones: Done flags [seq_len, batch]
+
+        Returns:
+            (new_hidden, embedding): Updated hidden state (1, batch, ...) and
+                                     embeddings [seq_len, batch, d_model]
+        """
+        if self.config.get("NO_RESET"):
+            dones = jnp.zeros_like(dones)
+
+        # Remove leading 1: (1, batch, ...) -> (batch, ...)
+        hidden_inner = jax.tree_map(lambda x: x.squeeze(0), hidden)
+
+        # Pre-embedding to d_model dimension
+        d_model = self.config.get("AGALITE_D_MODEL", 64)
+        embedding = nn.Dense(
+            d_model,
+            kernel_init=orthogonal(np.sqrt(2)),
+            bias_init=constant(0.0)
+        )(obs)
+        embedding = nn.relu(embedding)
+
+        # AGaLiTe processing
+        rnn_in = (embedding, dones)
+        new_hidden_inner, embedding = self.agalite(hidden_inner, rnn_in)
+
+        # Add leading 1 back: (batch, ...) -> (1, batch, ...)
+        new_hidden = jax.tree_map(lambda x: x[None, :], new_hidden_inner)
+
+        return new_hidden, embedding
 
 
 class ActorCriticBase(nn.Module):

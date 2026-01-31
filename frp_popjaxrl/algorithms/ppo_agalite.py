@@ -166,7 +166,7 @@ def make_train(config):
         eval_env = env
         eval_env_params = env_params
 
-    config["CONTINUOUS"] = type(env.action_space(env_params)) == spaces.Box
+    config["CONTINUOUS"] = isinstance(env.action_space(env_params), spaces.Box)
 
     linear_schedule = make_linear_schedule(config)
 

@@ -9,13 +9,11 @@ Key features:
 - Memory efficient (~1-2GB vs ~29GB for GTrXL)
 - Built-in reset_on_terminate support for episode boundaries
 """
-from math import gamma
-
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
-from typing import NamedTuple, Optional, Any, Sequence, Callable, TypedDict
+from typing import Callable, TypedDict
 from flax.linen.initializers import constant, orthogonal
 
 

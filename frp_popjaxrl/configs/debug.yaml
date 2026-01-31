@@ -1,0 +1,31 @@
+# Debug config for quick testing
+# All hardcoded debug values - used automatically when --debug 1 is set
+
+debug: 1
+num_runs: 1
+
+# PPO (minimal for fast iteration)
+lr: 2.5e-4
+num_envs: 2
+num_steps: 16
+total_timesteps: 1000
+update_epochs: 2
+num_minibatches: 2
+gae_lambda: 1.0
+ent_coef: 0.0
+anneal_lr: 0
+
+# S5 minimal settings
+s5_n_layers: 1
+s5_do_norm: 0
+s5_prenorm: 0
+s5_do_gtrxl_norm: 0
+
+# AGaLiTe minimal settings
+agalite_n_layers: 2
+agalite_d_model: 64
+agalite_d_head: 64
+agalite_d_ffc: 64
+agalite_n_heads: 2
+agalite_eta: 4
+agalite_r: 2

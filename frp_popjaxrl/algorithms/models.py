@@ -20,7 +20,6 @@ from typing import Sequence, Dict, Any
 import distrax
 from gymnax.environments import spaces
 from .s5 import StackedEncoderModel
-from .gtrxl import StackedTransformer
 
 
 class GRUCore(nn.Module):
@@ -242,121 +241,6 @@ class S5RepModel(nn.Module):
         hidden, embedding = self.s5(hidden, embedding, dones)
 
         return hidden, embedding
-
-
-class GTrXLRepModel(nn.Module):
-    """
-    GTrXL-based encoder for ActorCritic networks.
-
-    This encoder handles sequence encoding using GTrXL (Gated TransformerXL)
-    with relative position attention and optional gating.
-
-    Hidden State Format (compatible with GRU/S5):
-        List of memory tensors, each with shape (1, batch, mem_len * d_model)
-        The leading 1 is for compatibility with minibatch shuffling.
-        Internally reshaped to (batch, mem_len, d_model) for GTrXL processing.
-    """
-
-    config: Dict
-
-    @staticmethod
-    def initialize_carry(batch_size, config):
-        """
-        Initialize GTrXL memory state.
-
-        Args:
-            batch_size: Number of environments
-            config: Configuration dict with GTRXL_* parameters
-
-        Returns:
-            List of memory tensors, one per layer, each shape (1, batch, mem_len * d_model)
-        """
-        d_model = config.get("GTRXL_D_MODEL", 256)
-        n_layers = config.get("GTRXL_N_LAYERS", 2)
-        mem_len = config.get("GTRXL_MEM_LEN", 64)
-
-        # Shape: (1, batch, mem_len * d_model) - compatible with GRU/S5 minibatch handling
-        # The leading 1 allows axis=1 (batch) to be shuffled/reshaped in create_minibatches
-        return [
-            jnp.zeros((1, batch_size, mem_len * d_model))
-            for _ in range(n_layers)
-        ]
-
-    def setup(self):
-        """Setup GTrXL encoder layers."""
-        # Input encoder layers (same as GRU/S5)
-        self.rep_model_0 = nn.Dense(
-            128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )
-        self.rep_model_1 = nn.Dense(
-            self.config.get("GTRXL_D_MODEL", 256),
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0)
-        )
-
-        # Stacked GTrXL
-        self.transformer = StackedTransformer(
-            d_model=self.config.get("GTRXL_D_MODEL", 256),
-            num_heads=self.config.get("GTRXL_NUM_HEADS", 4),
-            n_layers=self.config.get("GTRXL_N_LAYERS", 2),
-            d_ff=self.config.get("GTRXL_D_FF", None),
-            mem_len=self.config.get("GTRXL_MEM_LEN", 64),
-            dropout_rate=self.config.get("GTRXL_DROPOUT", 0.0),
-            use_gating=self.config.get("GTRXL_GATING", True),
-        )
-
-    def __call__(self, hidden, obs, dones):
-        """
-        Encode observations using GTrXL.
-
-        Args:
-            hidden: List of memory tensors per layer, each (1, batch, mem_len * d_model)
-            obs: Observations [seq_len, batch, obs_dim]
-            dones: Done flags [seq_len, batch]
-
-        Returns:
-            (new_hidden, embedding): Updated memories and embeddings [seq_len, batch, d_model]
-        """
-        if self.config.get("NO_RESET"):
-            dones = jnp.zeros_like(dones)
-
-        d_model = self.config.get("GTRXL_D_MODEL", 256)
-        mem_len = self.config.get("GTRXL_MEM_LEN", 64)
-
-        # Input shape: (seq_len, batch, obs_dim) - frp_popjaxrl convention
-        # Transformer expects: (batch, seq_len, dim)
-        obs_t = jnp.swapaxes(obs, 0, 1)  # (batch, seq_len, obs_dim)
-        dones_t = jnp.swapaxes(dones, 0, 1)  # (batch, seq_len)
-        batch_size = obs_t.shape[0]
-
-        # Reshape hidden from (1, batch, mem_len * d_model) to (batch, mem_len, d_model)
-        memories = [
-            h.squeeze(0).reshape(batch_size, mem_len, d_model)
-            for h in hidden
-        ]
-
-        # Encoder layers
-        embedding = self.rep_model_0(obs_t)
-        embedding = nn.leaky_relu(embedding)
-        embedding = self.rep_model_1(embedding)
-        embedding = nn.leaky_relu(embedding)
-        # embedding: (batch, seq_len, d_model)
-
-        # Transformer processing
-        new_memories, embedding = self.transformer(memories, embedding, dones_t, deterministic=True)
-        # embedding: (batch, seq_len, d_model)
-        # new_memories: list of (batch, mem_len, d_model)
-
-        # Reshape memories back to (1, batch, mem_len * d_model) for compatibility
-        new_hidden = [
-            mem.reshape(1, batch_size, mem_len * d_model)
-            for mem in new_memories
-        ]
-
-        # Swap back to frp_popjaxrl convention: (seq_len, batch, d_model)
-        embedding = jnp.swapaxes(embedding, 0, 1)
-
-        return new_hidden, embedding
 
 
 class ActorCriticBase(nn.Module):

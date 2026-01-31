@@ -12,7 +12,7 @@ from gymnax.environments import spaces
 
 
 class Transition(NamedTuple):
-    """Single timestep transition for PPO training (GRU/S5).
+    """Single timestep transition for PPO training.
 
     Attributes:
         done: Episode done flags
@@ -22,9 +22,6 @@ class Transition(NamedTuple):
         log_prob: Log probabilities of actions
         obs: Observations
         info: Environment info
-
-    Note: GTrXL uses its own Transition class in ppo_gtrxl.py and ppo_gtrxl_frp.py
-          which includes memory caching for WINDOW_GRAD training.
     """
     done: jnp.ndarray
     action: jnp.ndarray
@@ -209,7 +206,7 @@ def create_network(encoder_type: str, action_space, config):
         >>> network = create_network('s5', env.action_space(env_params), config)
     """
     from algorithms.models import (
-        GRURepModel, S5RepModel, GTrXLRepModel,
+        GRURepModel, S5RepModel,
         ActorCriticContinuous, ActorCriticDiscrete
     )
 
@@ -218,12 +215,10 @@ def create_network(encoder_type: str, action_space, config):
         rep_model = GRURepModel(config=config)
     elif encoder_type.lower() == 's5':
         rep_model = S5RepModel(config=config)
-    elif encoder_type.lower() == 'gtrxl':
-        rep_model = GTrXLRepModel(config=config)
     else:
         raise ValueError(
             f"Unknown encoder_type: {encoder_type}. "
-            f"Valid values are 'gru', 's5', or 'gtrxl'."
+            f"Valid values are 'gru' or 's5'."
         )
 
     # Detect action space type and create appropriate ActorCritic

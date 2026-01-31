@@ -1,7 +1,7 @@
 """
 Training script for standard (non-meta) environments with new models.
 
-This script trains GRU/S5/GTrXL models on standard popgym environments
+This script trains GRU/S5/AGaLiTe models on standard popgym environments
 WITHOUT FRP transformations or MetaEnvironment wrappers.
 
 Key differences from run_meta_popgym_separated.py:
@@ -37,18 +37,16 @@ logger = logging.getLogger(__name__)
 def get_make_train(arch: str):
     """Get the appropriate make_train function based on architecture.
 
-    GTrXL and AGaLiTe use their own self-contained PPO modules,
+    AGaLiTe uses its own self-contained PPO module (ppo_agalite.py),
     while GRU/S5 use the standard PPO module (ppo_standard.py).
 
     Args:
-        arch: Architecture name ('gru', 's5', 'gtrxl', or 'agalite')
+        arch: Architecture name ('gru', 's5', or 'agalite')
 
     Returns:
         make_train function for the specified architecture
     """
-    if arch.lower() == "gtrxl":
-        from algorithms.ppo_gtrxl import make_train
-    elif arch.lower() == "agalite":
+    if arch.lower() == "agalite":
         from algorithms.ppo_agalite import make_train
     else:
         from algorithms.ppo_standard import make_train
@@ -99,7 +97,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
 
     if args.debug == 1:
         config = {
-            "MODEL_TYPE": arch,  # 'gru', 's5', or 'gtrxl'
+            "MODEL_TYPE": arch,  # 'gru', 's5', or 'agalite'
             "LR": 2.5e-4,
             "NUM_ENVS": 2,
             "NUM_STEPS": 16,
@@ -127,14 +125,6 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
             "S5_DO_NORM": False,
             "S5_PRENORM": False,
             "S5_DO_GTRXL_NORM": False,
-            # GTrXL config (debug mode)
-            "GTRXL_D_MODEL": 64,
-            "GTRXL_NUM_HEADS": 2,
-            "GTRXL_N_LAYERS": 1,
-            "GTRXL_D_FF": 128,
-            "GTRXL_MEM_LEN": 16,
-            "GTRXL_DROPOUT": 0.0,
-            "GTRXL_GATING": True,
             # AGaLiTe config (debug mode)
             "AGALITE_D_MODEL": 64,
             "AGALITE_D_HEAD": 64,
@@ -146,7 +136,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
         }
     else:
         config = {
-            "MODEL_TYPE": arch,  # 'gru', 's5', or 'gtrxl'
+            "MODEL_TYPE": arch,  # 'gru', 's5', or 'agalite'
             "LR": args.lr,
             "NUM_ENVS": args.num_envs,
             "NUM_STEPS": args.num_steps,
@@ -174,14 +164,6 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
             "S5_DO_NORM": (args.s5_do_norm == 1),
             "S5_PRENORM": (args.s5_prenorm == 1),
             "S5_DO_GTRXL_NORM": (args.s5_do_gtrxl_norm == 1),
-            # GTrXL config
-            "GTRXL_D_MODEL": args.gtrxl_d_model,
-            "GTRXL_NUM_HEADS": args.gtrxl_num_heads,
-            "GTRXL_N_LAYERS": args.gtrxl_n_layers,
-            "GTRXL_D_FF": args.gtrxl_d_model * 4,
-            "GTRXL_MEM_LEN": args.gtrxl_mem_len,
-            "GTRXL_DROPOUT": 0.0,
-            "GTRXL_GATING": (args.gtrxl_gating == 1),
             # AGaLiTe config
             "AGALITE_D_MODEL": args.agalite_d_model,
             "AGALITE_D_HEAD": args.agalite_d_head,
@@ -316,65 +298,6 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
             "time/total_time": total_rnn_time,
         })
 
-    elif arch == "gtrxl":
-        logger.info("Starting GTrXL compilation...")
-        train_vjit_tf = jax.jit(jax.vmap(make_train(config)))
-
-        # Start JAX profiler for compilation analysis (if enabled)
-        if jax_enable_profiler:
-            logger.info("Starting JAX profiler...")
-            jax.profiler.start_trace("/tmp/jax-trace")
-
-        t0 = time.time()
-        compiled_tf = train_vjit_tf.lower(rngs).compile()
-        compile_tf_time = time.time() - t0
-
-        # Stop JAX profiler after compilation (if enabled)
-        if jax_enable_profiler:
-            jax.profiler.stop_trace()
-            logger.info("JAX profiler trace saved to /tmp/jax-trace")
-
-        logger.info(f"GTrXL compilation completed in {compile_tf_time:.2f}s")
-
-        logger.info("Starting GTrXL training execution...")
-        t0 = time.time()
-        out_tf = jax.block_until_ready(compiled_tf(rngs))
-        run_tf_time = time.time() - t0
-        logger.info(f"GTrXL training completed in {run_tf_time:.2f}s")
-
-        # Calculate total time
-        total_tf_time = compile_tf_time + run_tf_time
-
-        # Display summary
-        logger.info("=" * 50)
-        logger.info("GTrXL Training Summary:")
-        logger.info(f"  Compile time:  {compile_tf_time:>8.2f}s")
-        logger.info(f"  Training time: {run_tf_time:>8.2f}s")
-        logger.info(f"  Total time:    {total_tf_time:>8.2f}s")
-        logger.info("=" * 50)
-
-        # Keep arrays as arrays, only convert scalars
-        metrics = jax.tree_util.tree_map(
-            lambda x: x.item() if (hasattr(x, 'item') and (not hasattr(x, 'shape') or x.shape == ())) else x,
-            out_tf[1]
-        )
-
-        # Create base info dictionary with common metrics
-        info_dict["gtrxl"] = {
-            "compile_tf_time": compile_tf_time,
-            "run_tf_time": run_tf_time,
-            "total_tf_time": total_tf_time,
-            "train_mer": metrics["train_mer"],
-            "eval_mer": metrics["eval_mer"],
-        }
-
-        # Log timing metrics to wandb with unified names
-        wandb.log({
-            "time/compile_time": compile_tf_time,
-            "time/run_time": run_tf_time,
-            "time/total_time": total_tf_time,
-        })
-
     elif arch == "agalite":
         logger.info("Starting AGaLiTe compilation...")
         train_vjit_agalite = jax.jit(jax.vmap(make_train(config)))
@@ -435,7 +358,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
         })
 
     else:
-        raise NotImplementedError(f"Unknown architecture: {arch}. Valid values are 'gru', 's5', 'gtrxl', or 'agalite'.")
+        raise NotImplementedError(f"Unknown architecture: {arch}. Valid values are 'gru', 's5', or 'agalite'.")
 
     if args.save_results == 1:
         jnp.save(f"results/{num_runs}_{env_name}_{arch}_{file_tag}.npy", info_dict)
@@ -450,8 +373,6 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
             runner_state = out_s5[0]
         elif arch == "gru":
             runner_state = out_rnn[0]
-        elif arch == "gtrxl":
-            runner_state = out_tf[0]
         elif arch == "agalite":
             runner_state = out_agalite[0]
 
@@ -529,7 +450,7 @@ if __name__ == "__main__":
     parser.add_argument("--env", type=str, default="StatelessCartPoleEasy",
                         help="Environment name (default: %(default)s)")
     parser.add_argument("--arch", type=str, default="gru",
-                        help="Architecture: gru, s5, gtrxl, or agalite (default: %(default)s)")
+                        help="Architecture: gru, s5, or agalite (default: %(default)s)")
     parser.add_argument("--log_wandb", type=str, default="popgym_standard",
                         help="Wandb project name (default: %(default)s)")
     parser.add_argument("--debug", type=int, default=0,
@@ -576,18 +497,6 @@ if __name__ == "__main__":
                         help="S5 prenormalization: 0 or 1 (default: %(default)s)")
     parser.add_argument("--s5_do_gtrxl_norm", type=int, default=0,
                         help="S5 GTrXL normalization: 0 or 1 (default: %(default)s)")
-
-    ### For GTrXL architecture hyperparameters (only used when arch=gtrxl)
-    parser.add_argument("--gtrxl_d_model", type=int, default=256,
-                        help="GTrXL model dimension (default: %(default)s)")
-    parser.add_argument("--gtrxl_num_heads", type=int, default=2,
-                        help="GTrXL number of attention heads (default: %(default)s)")
-    parser.add_argument("--gtrxl_n_layers", type=int, default=3,
-                        help="Number of GTrXL layers (default: %(default)s)")
-    parser.add_argument("--gtrxl_mem_len", type=int, default=64,
-                        help="GTrXL memory length (default: %(default)s)")
-    parser.add_argument("--gtrxl_gating", type=int, default=1,
-                        help="Use GTrXL gating: 0 or 1 (default: %(default)s)")
 
     ### For AGaLiTe architecture hyperparameters (only used when arch=agalite)
     parser.add_argument("--agalite_d_model", type=int, default=64,

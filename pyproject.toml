@@ -42,10 +42,3 @@ dev = [
 
 [tool.setuptools]
 packages = ["frp_popjaxrl"]
-
-[tool.ty]
-# Disable rules that produce false positives with JAX/Flax due to incomplete type stubs
-[tool.ty.rules]
-possibly-missing-attribute = "warn"  # Flax apply() returns complex union types
-invalid-argument-type = "warn"       # JAX array type narrowing issues
-invalid-assignment = "warn"          # Flax module return type issues

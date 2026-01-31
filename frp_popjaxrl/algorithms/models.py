@@ -16,9 +16,8 @@ import flax.linen as nn
 import numpy as np
 import functools
 from flax.linen.initializers import constant, orthogonal
-from typing import Sequence, Dict, Any
+from typing import Dict
 import distrax
-from gymnax.environments import spaces
 from .s5 import StackedEncoderModel
 from .agalite import BatchedAGaLiTe
 

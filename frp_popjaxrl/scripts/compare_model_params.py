@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Compare parameter counts across GRU, S5, and GTrXL architectures.
+Compare parameter counts across GRU, S5, and AGaLiTe architectures.
 
 This script creates models with various configurations and counts their parameters,
 outputting a formatted comparison table.
 
-GTrXL reference: https://github.com/Reytuag/transformerXL_PPO_JAX
+AGaLiTe reference: https://arxiv.org/abs/2504.06983
 """
 
 import sys
@@ -27,9 +27,10 @@ class ModelConfig:
     arch: str
     layers: int
     dim: int
-    mem_len: Optional[int] = None
-    heads: Optional[int] = None
-    gating: Optional[bool] = None
+    # AGaLiTe-specific parameters
+    n_heads: Optional[int] = None
+    eta: Optional[int] = None
+    r: Optional[int] = None
 
     def to_config_dict(self, obs_dim: int = 16, action_dim: int = 4) -> dict:
         """Convert to configuration dictionary for model creation."""
@@ -48,23 +49,23 @@ class ModelConfig:
             "S5_DO_NORM": False,
             "S5_PRENORM": False,
             "S5_DO_GTRXL_NORM": False,
-            # GTrXL settings (d_ff = d_model following transformerXL_PPO_JAX)
-            "GTRXL_D_MODEL": self.dim,
-            "GTRXL_NUM_HEADS": self.heads if self.heads else 4,
-            "GTRXL_N_LAYERS": self.layers,
-            "GTRXL_D_FF": self.dim,  # d_ff = d_model, following transformerXL_PPO_JAX
-            "GTRXL_MEM_LEN": self.mem_len if self.mem_len else 64,
-            "GTRXL_DROPOUT": 0.0,
-            "GTRXL_GATING": self.gating if self.gating is not None else True,
+            # AGaLiTe settings
+            "AGALITE_N_LAYERS": self.layers,
+            "AGALITE_D_MODEL": self.dim,
+            "AGALITE_D_HEAD": self.dim,
+            "AGALITE_D_FFC": self.dim,
+            "AGALITE_N_HEADS": self.n_heads if self.n_heads else 4,
+            "AGALITE_ETA": self.eta if self.eta else 4,
+            "AGALITE_R": self.r if self.r else 2,
         }
         return config
 
     def description(self) -> str:
         """Return a formatted description for the table."""
-        mem_str = str(self.mem_len) if self.mem_len else "-"
-        heads_str = str(self.heads) if self.heads else "-"
-        gating_str = "ON" if self.gating else ("OFF" if self.gating is False else "-")
-        return f"{self.arch:<12} {self.layers:<7} {self.dim:<5} {mem_str:<7} {heads_str:<6} {gating_str:<11}"
+        n_heads_str = str(self.n_heads) if self.n_heads else "-"
+        eta_str = str(self.eta) if self.eta else "-"
+        r_str = str(self.r) if self.r else "-"
+        return f"{self.arch:<12} {self.layers:<7} {self.dim:<5} {n_heads_str:<7} {eta_str:<5} {r_str:<5}"
 
 
 def count_params(params) -> int:
@@ -79,7 +80,7 @@ def create_and_count_params(
     from frp_popjaxrl.algorithms.models import (
         GRURepModel,
         S5RepModel,
-        GTrXLRepModel,
+        AGaLiTeRepModel,
         ActorCriticDiscrete,
     )
 
@@ -90,8 +91,8 @@ def create_and_count_params(
         rep_model = GRURepModel(config=config)
     elif model_config.arch == "S5":
         rep_model = S5RepModel(config=config)
-    elif model_config.arch == "GTrXL":
-        rep_model = GTrXLRepModel(config=config)
+    elif model_config.arch == "AGaLiTe":
+        rep_model = AGaLiTeRepModel(config=config)
     else:
         raise ValueError(f"Unknown architecture: {model_config.arch}")
 
@@ -136,38 +137,33 @@ def main():
     for layers in [1, 2, 4]:
         configs.append(ModelConfig(arch="S5", layers=layers, dim=256))
 
-    # 3. GTrXL configurations
-    # Layer comparison with gating ON/OFF (dim=256, mem_len=64, heads=4)
-    for layers in [1, 2, 4]:
-        for gating in [True, False]:
+    # 3. AGaLiTe configurations
+    # Layer comparison with different dimensions
+    for layers in [2, 4]:
+        for dim in [64, 128, 256]:
             configs.append(
                 ModelConfig(
-                    arch="GTrXL",
+                    arch="AGaLiTe",
                     layers=layers,
-                    dim=256,
-                    mem_len=64,
-                    heads=4,
-                    gating=gating,
+                    dim=dim,
+                    n_heads=4,
+                    eta=4,
+                    r=2,
                 )
             )
 
-    # Dim comparison (layers=2, gating=True)
-    for dim in [128, 512]:
-        heads = max(2, dim // 64)  # Ensure divisibility
+    # Eta comparison (layers=2, dim=64)
+    for eta in [2, 4, 8]:
         configs.append(
             ModelConfig(
-                arch="GTrXL",
+                arch="AGaLiTe",
                 layers=2,
-                dim=dim,
-                mem_len=64,
-                heads=heads,
-                gating=True,
+                dim=64,
+                n_heads=4,
+                eta=eta,
+                r=2,
             )
         )
-
-    # Note: mem_len and heads do not affect parameter count
-    # (they are architectural hyperparameters, not learned parameters)
-    # So we don't include separate comparisons for them
 
     # Count parameters for all configurations
     results = []
@@ -187,7 +183,7 @@ def main():
     print(f"(obs_dim={obs_dim}, action_dim={action_dim})")
     print("=" * 80)
     print(
-        f"{'Arch':<12} {'Layers':<7} {'Dim':<5} {'MemLen':<7} {'Heads':<6} {'Gating':<11} {'Params':>12} {'vs GRU':>10}"
+        f"{'Arch':<12} {'Layers':<7} {'Dim':<5} {'Heads':<7} {'Eta':<5} {'R':<5} {'Params':>12} {'vs GRU':>10}"
     )
     print("-" * 80)
 
@@ -206,24 +202,15 @@ def main():
     # Group by category
     gru_results = [(c, p) for c, p in results if c.arch == "GRU"]
     s5_results = [(c, p) for c, p in results if c.arch == "S5"]
-    transformer_results = [(c, p) for c, p in results if c.arch == "GTrXL"]
+    agalite_results = [(c, p) for c, p in results if c.arch == "AGaLiTe"]
 
     print(f"\nGRU (baseline): {gru_results[0][1]:,} params")
 
     print(f"\nS5 range: {min(p for _, p in s5_results):,} - {max(p for _, p in s5_results):,} params")
     print(f"  vs GRU: {min(p for _, p in s5_results) / gru_params:.1f}x - {max(p for _, p in s5_results) / gru_params:.1f}x")
 
-    print(f"\nGTrXL range: {min(p for _, p in transformer_results):,} - {max(p for _, p in transformer_results):,} params")
-    print(f"  vs GRU: {min(p for _, p in transformer_results) / gru_params:.1f}x - {max(p for _, p in transformer_results) / gru_params:.1f}x")
-
-    # Gating effect
-    gating_on = [p for c, p in transformer_results if c.gating]
-    gating_off = [p for c, p in transformer_results if not c.gating]
-    if gating_on and gating_off:
-        print(f"\nGating effect (average):")
-        print(f"  Gating ON:  {sum(gating_on) / len(gating_on):,.0f} params")
-        print(f"  Gating OFF: {sum(gating_off) / len(gating_off):,.0f} params")
-        print(f"  Ratio: {sum(gating_on) / len(gating_on) / (sum(gating_off) / len(gating_off)):.2f}x")
+    print(f"\nAGaLiTe range: {min(p for _, p in agalite_results):,} - {max(p for _, p in agalite_results):,} params")
+    print(f"  vs GRU: {min(p for _, p in agalite_results) / gru_params:.1f}x - {max(p for _, p in agalite_results) / gru_params:.1f}x")
 
     print("=" * 80)
 

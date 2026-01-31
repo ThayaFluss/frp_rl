@@ -56,7 +56,7 @@ def make_train(config):
     linear_schedule = make_linear_schedule(config)
 
     # Create network with encoder type from config (defaults to 'gru')
-    # Note: AGaLiTe uses ppo_agalite.py instead - this file is for GRU/S5 only
+    # Supports GRU, S5, and AGaLiTe via unified RepModel interface
     model_type = config.get("MODEL_TYPE", "gru").lower()
     network = create_network(model_type, env.action_space(env_params), config)
 

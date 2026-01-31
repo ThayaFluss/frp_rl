@@ -23,7 +23,6 @@ import logging
 from envs import make
 from envs.wrappers import AliasPrevActionV2
 from utils.checkpoint import create_experiment_directory, save_config_yaml, save_checkpoint, save_run_info
-import argparse
 
 # Configure logging
 logging.basicConfig(
@@ -93,84 +92,15 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
     # For standard training, eval uses the same environment
     eval_env, eval_env_params = make(env_name, **env_kwargs)
 
-    if args.debug == 1:
-        config = {
-            "MODEL_TYPE": arch,  # 'gru', 's5', or 'agalite'
-            "LR": 2.5e-4,
-            "NUM_ENVS": 2,
-            "NUM_STEPS": 16,
-            "TOTAL_TIMESTEPS": 1e3,
-            "UPDATE_EPOCHS": 2,
-            "NUM_MINIBATCHES": 2,
-            "GAMMA": 0.99,
-            "GAE_LAMBDA": 1.0,
-            "CLIP_EPS": 0.2,
-            "ENT_COEF": 0.0,
-            "VF_COEF": 1.0,
-            "MAX_GRAD_NORM": 0.5,
-            "ENV": AliasPrevActionV2(env),
-            "ENV_PARAMS": env_params,
-            "EVAL_ENV": AliasPrevActionV2(eval_env),
-            "EVAL_ENV_PARAMS": eval_env_params,
-            "EVAL_SEED": eval_seed,
-            "ANNEAL_LR": False,
-            "DEBUG": True,
-            "S5_D_MODEL": 256,
-            "S5_SSM_SIZE": 256,
-            "S5_N_LAYERS": 1,
-            "S5_BLOCKS": 1,
-            "S5_ACTIVATION": "full_glu",
-            "S5_DO_NORM": False,
-            "S5_PRENORM": False,
-            "S5_DO_GTRXL_NORM": False,
-            # AGaLiTe config (debug mode)
-            "AGALITE_D_MODEL": 64,
-            "AGALITE_D_HEAD": 64,
-            "AGALITE_D_FFC": 64,
-            "AGALITE_N_HEADS": 2,
-            "AGALITE_N_LAYERS": 2,
-            "AGALITE_ETA": 4,
-            "AGALITE_R": 2,
-        }
-    else:
-        config = {
-            "MODEL_TYPE": arch,  # 'gru', 's5', or 'agalite'
-            "LR": args.lr,
-            "NUM_ENVS": args.num_envs,
-            "NUM_STEPS": args.num_steps,
-            "TOTAL_TIMESTEPS": args.total_timesteps,
-            "UPDATE_EPOCHS": args.update_epochs,
-            "NUM_MINIBATCHES": args.num_minibatches,
-            "GAMMA": 0.99,
-            "GAE_LAMBDA": args.gae_lambda,
-            "CLIP_EPS": 0.2,
-            "ENT_COEF": args.ent_coef,
-            "VF_COEF": 1.0,
-            "MAX_GRAD_NORM": 0.5,
-            "ENV": AliasPrevActionV2(env),
-            "ENV_PARAMS": env_params,
-            "EVAL_ENV": AliasPrevActionV2(eval_env),
-            "EVAL_ENV_PARAMS": eval_env_params,
-            "EVAL_SEED": eval_seed,
-            "ANNEAL_LR": (args.anneal_lr == 1),
-            "DEBUG": True,
-            "S5_D_MODEL": 256,
-            "S5_SSM_SIZE": 256,
-            "S5_N_LAYERS": args.s5_n_layers,
-            "S5_BLOCKS": 1,
-            "S5_ACTIVATION": "full_glu",
-            "S5_DO_NORM": (args.s5_do_norm == 1),
-            "S5_PRENORM": (args.s5_prenorm == 1),
-            "S5_DO_GTRXL_NORM": (args.s5_do_gtrxl_norm == 1),
-            # AGaLiTe config
-            "AGALITE_D_MODEL": args.agalite_d_model,
-            "AGALITE_D_HEAD": args.agalite_d_head,
-            "AGALITE_D_FFC": args.agalite_d_ffc,
-            "AGALITE_N_HEADS": args.agalite_n_heads,
-            "AGALITE_N_LAYERS": args.agalite_n_layers,
-            "AGALITE_ETA": args.agalite_eta,
-            "AGALITE_R": args.agalite_r,
-        }
+    # Build unified training config (no debug branching needed)
+    from utils.config import build_training_config
+    config = build_training_config(
+        args=args,
+        env=AliasPrevActionV2(env),
+        env_params=env_params,
+        eval_env=AliasPrevActionV2(eval_env),
+        eval_env_params=eval_env_params,
+    )
 
     rngs = jax.random.split(train_rng, num_runs)
     info_dict = {}
@@ -439,80 +369,12 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, wandb_
 
 if __name__ == "__main__":
     import wandb
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Training script for standard environments (no FRP/meta-learning)"
-    )
-    parser.add_argument("--num_runs", type=int, default=1,
-                        help="Number of training runs (default: %(default)s)")
-    parser.add_argument("--env", type=str, default="StatelessCartPoleEasy",
-                        help="Environment name (default: %(default)s)")
-    parser.add_argument("--arch", type=str, default="gru",
-                        help="Architecture: gru, s5, or agalite (default: %(default)s)")
-    parser.add_argument("--log_wandb", type=str, default="popgym_standard",
-                        help="Wandb project name (default: %(default)s)")
-    parser.add_argument("--debug", type=int, default=0,
-                        help="Debug mode: 0 or 1 (default: %(default)s)")
-    parser.add_argument("--jax_profile", type=int, default=0,
-                        help="JAX profiling level: 0=disabled, 1=compile_log, 2=profiler+compile_log (default: %(default)s)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for training (default: %(default)s)")
-    parser.add_argument("--eval_seed", type=int, default=None,
-                        help="Random seed for evaluation. If None, uses seed + 10000 (default: %(default)s)")
+    from utils.arguments import create_standard_parser
+    from utils.config import load_config_with_debug_support
 
-    ### For saving results and models
-    parser.add_argument("--save_results", type=int, default=0,
-                        help="Save results npy (default: %(default)s)")
-    parser.add_argument("--save_model", type=int, default=0,
-                        help="Save model checkpoint (default: %(default)s)")
-
-    ### For PPO hyperparameters (only used when debug=0)
-    parser.add_argument("--lr", type=float, default=5e-5,
-                        help="Learning rate (default: %(default)s)")
-    parser.add_argument("--ent_coef", type=float, default=0.0,
-                        help="Entropy coefficient (default: %(default)s)")
-    parser.add_argument("--gae_lambda", type=float, default=1.0,
-                        help="GAE lambda (default: %(default)s)")
-    parser.add_argument("--update_epochs", type=int, default=30,
-                        help="Number of update epochs (default: %(default)s)")
-    parser.add_argument("--num_envs", type=int, default=64,
-                        help="Number of parallel environments (default: %(default)s)")
-    parser.add_argument("--num_steps", type=int, default=1024,
-                        help="Number of steps per update (default: %(default)s)")
-    parser.add_argument("--total_timesteps", type=float, default=1e6,
-                        help="Total timesteps (default: %(default)s)")
-    parser.add_argument("--num_minibatches", type=int, default=8,
-                        help="Number of minibatches (default: %(default)s)")
-    parser.add_argument("--anneal_lr", type=int, default=0,
-                        help="Anneal learning rate: 0 or 1 (default: %(default)s)")
-
-    ### For S5 architecture hyperparameters (only used when debug=0)
-    parser.add_argument("--s5_n_layers", type=int, default=4,
-                        help="Number of S5 layers (default: %(default)s)")
-    parser.add_argument("--s5_do_norm", type=int, default=0,
-                        help="S5 do normalization: 0 or 1 (default: %(default)s)")
-    parser.add_argument("--s5_prenorm", type=int, default=0,
-                        help="S5 prenormalization: 0 or 1 (default: %(default)s)")
-    parser.add_argument("--s5_do_gtrxl_norm", type=int, default=0,
-                        help="S5 GTrXL normalization: 0 or 1 (default: %(default)s)")
-
-    ### For AGaLiTe architecture hyperparameters (only used when arch=agalite)
-    parser.add_argument("--agalite_d_model", type=int, default=64,
-                        help="AGaLiTe model dimension (default: %(default)s)")
-    parser.add_argument("--agalite_d_head", type=int, default=64,
-                        help="AGaLiTe head dimension (default: %(default)s)")
-    parser.add_argument("--agalite_d_ffc", type=int, default=64,
-                        help="AGaLiTe feed-forward dimension (default: %(default)s)")
-    parser.add_argument("--agalite_n_heads", type=int, default=4,
-                        help="AGaLiTe number of attention heads (default: %(default)s)")
-    parser.add_argument("--agalite_n_layers", type=int, default=4,
-                        help="Number of AGaLiTe layers (default: %(default)s)")
-    parser.add_argument("--agalite_eta", type=int, default=4,
-                        help="AGaLiTe eta parameter (default: %(default)s)")
-    parser.add_argument("--agalite_r", type=int, default=2,
-                        help="AGaLiTe r parameter for oscillation (default: %(default)s)")
-
+    parser = create_standard_parser()
     args = parser.parse_args()
+    args = load_config_with_debug_support(parser, args)
 
     # Environment specific kwargs (empty for standard environments)
     env_kwargs = {}

@@ -499,13 +499,13 @@ if __name__ == "__main__":
                         help="Path to checkpoint file (e.g., checkpoints/cartpole_gru_seed42.pkl)")
     parser.add_argument("--mode", type=str, required=True, choices=["legacy", "lazy"],
                         help="Implementation mode (must be 'legacy' or 'lazy')")
-    parser.add_argument("--eval_num_trials", type=int, default=16,
+    parser.add_argument("--eval_num_trials", type=int, default=32,
                         help="Number of trials per episode for evaluation (default: %(default)s)")
     parser.add_argument("--eval_method", type=str, default="tiling",
                         help="Evaluation method: tiling / padding / identity (default: %(default)s)")
     parser.add_argument("--num_episodes", type=int, default=10,
                         help="Number of episodes to evaluate (default: %(default)s)")
-    parser.add_argument("--seed", type=int, default=0,
+    parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for evaluation (default: %(default)s)")
     parser.add_argument("--log_wandb", type=str, default="popgym_eval",
                         help="Wandb project name for logging (default: %(default)s). Set to empty string to disable.")

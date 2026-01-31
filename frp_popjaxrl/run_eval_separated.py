@@ -117,7 +117,7 @@ def reconstruct_frp_manager(metadata, env, env_params):
     return manager
 
 
-def evaluate_model(checkpoint_path, eval_num_trials=16, num_episodes=10, seed=None, eval_method="tiling", log_wandb=None):
+def evaluate_model(checkpoint_path, eval_num_trials=32, num_episodes=10, seed=None, eval_method="tiling", log_wandb=None):
     """
     Evaluate a saved model checkpoint (separated mode) and track per-trial statistics.
 
@@ -133,7 +133,7 @@ def evaluate_model(checkpoint_path, eval_num_trials=16, num_episodes=10, seed=No
 
     Args:
         checkpoint_path: Path to checkpoint (.pkl file)
-        eval_num_trials: Number of trials per episode (default: 16)
+        eval_num_trials: Number of trials per episode (default: 32)
         num_episodes: Number of episodes to evaluate (default: 10)
         seed: Random seed for evaluation (default: None, uses checkpoint's eval_seed)
         eval_method: Evaluation method - tiling/padding/identity (default: "tiling")
@@ -321,7 +321,7 @@ def evaluate_model(checkpoint_path, eval_num_trials=16, num_episodes=10, seed=No
         episode_length = jnp.zeros((1,), dtype=jnp.int32)
 
         # Track rewards and trial numbers for each step
-        num_trials = meta_kwargs.get('num_trials_per_episode', 16)
+        num_trials = meta_kwargs.get('num_trials_per_episode', 32)
         max_steps = num_trials * 200  # Assume max 200 steps per trial
 
         def step_fn(carry, _):
@@ -556,7 +556,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to checkpoint file (e.g., checkpoints/cartpole_gru_seed42.pkl)")
-    parser.add_argument("--eval_num_trials", type=int, default=16,
+    parser.add_argument("--eval_num_trials", type=int, default=32,
                         help="Number of trials per episode for evaluation (default: %(default)s)")
     parser.add_argument("--eval_method", type=str, default="tiling",
                         help="Evaluation method: tiling / padding / identity (default: %(default)s)")

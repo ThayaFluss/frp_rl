@@ -32,11 +32,8 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "pylint>=3.0.0",
-    "flake8>=7.0.0",
-    "black>=24.0.0",
-    "isort>=5.13.0",
-    "mypy>=1.8.0",
+    "ruff>=0.9.0",
+    "ty>=0.0.1a7",
 ]
 
 [[tool.rye.sources]]
@@ -45,3 +42,10 @@ dev = [
 
 [tool.setuptools]
 packages = ["frp_popjaxrl"]
+
+[tool.ty]
+# Disable rules that produce false positives with JAX/Flax due to incomplete type stubs
+[tool.ty.rules]
+possibly-missing-attribute = "warn"  # Flax apply() returns complex union types
+invalid-argument-type = "warn"       # JAX array type narrowing issues
+invalid-assignment = "warn"          # Flax module return type issues

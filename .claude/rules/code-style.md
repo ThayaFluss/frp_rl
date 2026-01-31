@@ -1,112 +1,48 @@
 # Code Style Guidelines
 
-**Last Updated:** 2026-01-05
+**Last Updated:** 2026-01-28
 
 ---
 
-## General Principles
+## Documentation Principles for `.claude/`
+
+- Write abstract, change-resistant principles rather than implementation details
+- Omit rules that are obvious to Claude Code (standard Python conventions, etc.)
+- Include repository-specific notable points (JAX patterns, dimension handling, etc.)
+
+---
+
+## JAX/Flax Principles
 
 ### Pure Functional Programming
+
 - All JAX functions must be pure (no side effects)
-- No global state modifications
-- Predictable behavior for same inputs
+- Use `flax.struct.dataclass` for stateful data
+- Update state via `.replace()` method, never modify in-place
 
-### Immutable Data Structures
-- Use `flax.struct.dataclass` for all stateful data
-- Never modify arrays in-place
-- Update state using `.replace()` method
+### Control Flow in JIT
 
-### Type Hints Required
-- All public functions must have type hints
-- Parameters and return values must be annotated
-- Use `chex.Array` for JAX arrays
-
----
-
-## Documentation Standards
-
-### Docstrings
-- Required for all public functions and classes
-- Include Args, Returns, and Raises sections
-- Add Examples for non-trivial functions
-
-### Inline Comments
-- Annotate all array shapes in comments
-- Explain non-obvious logic
-- Document JAX-specific patterns
-- Note performance considerations
-
----
-
-## JAX-Specific Requirements
-
-### Control Flow
-- Use `jax.lax.cond` instead of Python `if` inside JIT
+- Use `jax.lax.cond` instead of Python `if` on JAX arrays
 - Use `jax.lax.select` for element-wise conditionals
-- Mark non-array arguments as static in JIT
+- Mark non-array arguments as `static_argnums`
 
-### Vectorization
-- Prefer `jax.vmap` over Python loops
+### Performance
+
 - Avoid dynamic shapes that trigger recompilation
+- Prefer `jax.vmap` over Python loops
 
 ---
 
-## Naming Conventions
+## Documentation
 
-### Style
-- Classes: `PascalCase`
-- Functions/variables: `snake_case`
-- Constants: `UPPER_SNAKE_CASE`
-- Private: prefix with `_`
+### Array Shape Annotations
 
-### Clarity
-- Use descriptive names
-- Avoid abbreviations unless standard
-- Be consistent within the codebase
+- Annotate all array shapes in comments (e.g., `# (batch, seq, dim)`)
+- Document dimension transformations at function boundaries
 
 ---
 
-## Code Organization
+## Markdown Formatting
 
-### File Structure
-```python
-# Standard library
-# Third-party libraries (alphabetical)
-# Local imports (relative)
-
-# Constants
-# Dataclasses
-# Classes
-# Functions
-```
-
-### Line Length
-- Target: 100 characters
-- Flexible to 120 for readability
-
----
-
-## Error Handling
-
-- Provide actionable error messages
-- Include context and expected values
-- Suggest fixes when possible
-
----
-
-## Performance
-
-- Avoid recompilation by keeping shapes static
-- Use appropriate JAX transformations (jit, vmap)
-- Minimize unnecessary array operations
-
----
-
-## Code Review Checklist
-
-- [ ] Type hints on all public functions
-- [ ] Docstrings present and complete
-- [ ] Array shapes documented in comments
-- [ ] No Python control flow on JAX arrays inside JIT
-- [ ] Immutable data structures used
-- [ ] Error messages are clear and actionable
+- Add blank lines after headings and around lists/code blocks
+- Use unique heading names within a document

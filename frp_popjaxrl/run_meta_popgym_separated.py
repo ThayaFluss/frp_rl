@@ -133,14 +133,6 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "S5_PRENORM": False,
         "S5_DO_GTRXL_NORM": False,
         "RESET_WORDS": (args.reset_words == 1),
-        # Transformer config (debug mode)
-        "TRANSFORMER_D_MODEL": 64,
-        "TRANSFORMER_NUM_HEADS": 2,
-        "TRANSFORMER_N_LAYERS": 1,
-        "TRANSFORMER_D_FF": 128,
-        "TRANSFORMER_MEM_LEN": 16,
-        "TRANSFORMER_DROPOUT": 0.0,
-        "TRANSFORMER_GATING": True,
         }
     else:
         config = {
@@ -175,15 +167,7 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
         "S5_DO_NORM": (args.s5_do_norm == 1),
         "S5_PRENORM": (args.s5_prenorm == 1),
         "S5_DO_GTRXL_NORM": (args.s5_do_gtrxl_norm == 1),
-        "RESET_WORDS": (args.reset_words == 1),
-        # Transformer config
-        "TRANSFORMER_D_MODEL": args.transformer_d_model,
-        "TRANSFORMER_NUM_HEADS": args.transformer_num_heads,
-        "TRANSFORMER_N_LAYERS": args.transformer_n_layers,
-        "TRANSFORMER_D_FF": args.transformer_d_model * 4,
-        "TRANSFORMER_MEM_LEN": args.transformer_mem_len,
-        "TRANSFORMER_DROPOUT": 0.0,
-        "TRANSFORMER_GATING": (args.transformer_gating == 1),
+        "RESET_WORDS": (args.reset_words == 1)
         }
 
     rngs = jax.random.split(train_rng, num_runs)
@@ -313,70 +297,8 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             "time/total_time": total_rnn_time,
         })
 
-    elif arch == "transformer":
-        logger.info("Starting Transformer compilation...")
-        train_vjit_tf = jax.jit(jax.vmap(make_train(config)))
-
-        # Start JAX profiler for compilation analysis (if enabled)
-        if jax_enable_profiler:
-            logger.info("Starting JAX profiler...")
-            jax.profiler.start_trace("/tmp/jax-trace")
-
-        t0 = time.time()
-        compiled_tf = train_vjit_tf.lower(rngs).compile()
-        compile_tf_time = time.time() - t0
-
-        # Stop JAX profiler after compilation (if enabled)
-        if jax_enable_profiler:
-            jax.profiler.stop_trace()
-            logger.info("JAX profiler trace saved to /tmp/jax-trace")
-
-        logger.info(f"Transformer compilation completed in {compile_tf_time:.2f}s")
-
-        logger.info("Starting Transformer training execution...")
-        t0 = time.time()
-        out_tf = jax.block_until_ready(compiled_tf(rngs))
-        run_tf_time = time.time() - t0
-        logger.info(f"Transformer training completed in {run_tf_time:.2f}s")
-
-        # Calculate total time
-        total_tf_time = compile_tf_time + run_tf_time
-
-        # Display summary
-        logger.info("=" * 50)
-        logger.info("Transformer Training Summary:")
-        logger.info(f"  Compile time:  {compile_tf_time:>8.2f}s")
-        logger.info(f"  Training time: {run_tf_time:>8.2f}s")
-        logger.info(f"  Total time:    {total_tf_time:>8.2f}s")
-        logger.info("=" * 50)
-
-        # Keep arrays as arrays, only convert scalars
-        metrics = jax.tree_util.tree_map(
-            lambda x: x.item() if (hasattr(x, 'item') and (not hasattr(x, 'shape') or x.shape == ())) else x,
-            out_tf[1]
-        )
-
-        # Create base info dictionary with common metrics
-        info_dict["transformer"] = {
-            "compile_tf_time": compile_tf_time,
-            "run_tf_time": run_tf_time,
-            "total_tf_time": total_tf_time,
-            "train_mer": metrics["train_mer"],
-            "eval_mer": metrics["eval_mer"],
-        }
-
-        if "few_shot_metric" in metrics:
-            info_dict["transformer"]["few_shot_metrics"] = metrics["few_shot_metric"]
-
-        # Log timing metrics to wandb with unified names
-        wandb.log({
-            "time/compile_time": compile_tf_time,
-            "time/run_time": run_tf_time,
-            "time/total_time": total_tf_time,
-        })
-
     else:
-        raise NotImplementedError(f"Unknown architecture: {arch}. Valid values are 'gru', 's5', or 'transformer'.")
+        raise NotImplementedError
 
     if args.save_results == 1:
         jnp.save(f"results/{num_runs}_{env_name}_{arch}_{file_tag}.npy", info_dict)
@@ -391,8 +313,6 @@ def run(args, num_runs, env_name, arch="gru", file_tag="", env_kwargs={}, meta_k
             runner_state = out_s5[0]
         elif arch == "gru":
             runner_state = out_rnn[0]
-        elif arch == "transformer":
-            runner_state = out_tf[0]
 
         # Get the first run's state (in case of multiple runs)
         train_state = jax.tree_util.tree_map(lambda x: x[0] if len(x.shape) > 0 else x, runner_state[0])
@@ -550,18 +470,6 @@ if __name__ == "__main__":
                         help="S5 prenormalization: 0 or 1 (default: %(default)s)")
     parser.add_argument("--s5_do_gtrxl_norm", type=int, default=0,
                         help="S5 GTrXL normalization: 0 or 1 (default: %(default)s)")
-
-    ### For Transformer architecture hyperparameters (only used when arch=transformer)
-    parser.add_argument("--transformer_d_model", type=int, default=256,
-                        help="Transformer model dimension (default: %(default)s)")
-    parser.add_argument("--transformer_num_heads", type=int, default=4,
-                        help="Transformer number of attention heads (default: %(default)s)")
-    parser.add_argument("--transformer_n_layers", type=int, default=2,
-                        help="Number of Transformer layers (default: %(default)s)")
-    parser.add_argument("--transformer_mem_len", type=int, default=64,
-                        help="Transformer memory length (default: %(default)s)")
-    parser.add_argument("--transformer_gating", type=int, default=1,
-                        help="Use GTrXL gating: 0 or 1 (default: %(default)s)")
 
     ### For FRP input configuration
     parser.add_argument("--frp_include_metadata", type=int, default=0,

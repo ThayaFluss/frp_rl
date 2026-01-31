@@ -25,13 +25,7 @@
       "Bash(git push)",
       "Bash(.venv/bin/ruff check . --statistics)",
       "Bash(.venv/bin/ruff format:*)",
-      "Bash(.venv/bin/ty check:*)",
-      "WebSearch",
-      "WebFetch(domain:github.com)",
-      "Bash(uv run pytest:*)",
-      "Bash(uv run ty check:*)",
-      "Bash(uv run ruff check:*)",
-      "Bash(uv run ruff format:*)"
+      "Bash(.venv/bin/ty check:*)"
     ]
   }
 }

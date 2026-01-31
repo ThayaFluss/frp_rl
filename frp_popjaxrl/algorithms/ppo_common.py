@@ -196,7 +196,7 @@ def create_network(encoder_type: str, action_space, config):
         >>> network = create_network('s5', env.action_space(env_params), config)
     """
     from algorithms.models import (
-        GRURepModel, S5RepModel,
+        GRURepModel, S5RepModel, TransformerRepModel,
         ActorCriticContinuous, ActorCriticDiscrete
     )
 
@@ -205,10 +205,12 @@ def create_network(encoder_type: str, action_space, config):
         rep_model = GRURepModel(config=config)
     elif encoder_type.lower() == 's5':
         rep_model = S5RepModel(config=config)
+    elif encoder_type.lower() == 'transformer':
+        rep_model = TransformerRepModel(config=config)
     else:
         raise ValueError(
             f"Unknown encoder_type: {encoder_type}. "
-            f"Valid values are 'gru' or 's5'."
+            f"Valid values are 'gru', 's5', or 'transformer'."
         )
 
     # Detect action space type and create appropriate ActorCritic

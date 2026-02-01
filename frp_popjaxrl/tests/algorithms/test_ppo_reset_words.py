@@ -8,9 +8,9 @@ import unittest
 import jax
 import jax.numpy as jnp
 import wandb
-from algorithms.ppo_in_context import make_train
+from algorithms.ppo_in_context_lazy import make_train
 from envs.wrappers import AliasPrevActionV2
-from envs.meta_environment import create_meta_environment
+from envs.meta_environment_lazy import create_meta_environment
 
 
 class TestPPOResetWords(unittest.TestCase):

@@ -73,32 +73,86 @@ def count_params(params) -> int:
     return sum(x.size for x in jax.tree_util.tree_leaves(params))
 
 
+def count_core_params(
+    arch: str, layers: int, dim: int, n_heads: int = 4, eta: int = 4, r: int = 2
+) -> int:
+    """Count parameters for a Core module only (excluding encoder/actor/critic heads).
+
+    Args:
+        arch: Architecture type ("GRU", "S5", "AGaLiTe")
+        layers: Number of layers
+        dim: Model dimension
+        n_heads: Number of attention heads (AGaLiTe only)
+        eta: Memory capacity parameter (AGaLiTe only)
+        r: r parameter (AGaLiTe only)
+
+    Returns:
+        Number of parameters in the core
+    """
+    from frp_popjaxrl.algorithms.models import GRUCore, S5Core, AGaLiTeCore
+
+    batch_size = 1
+    seq_len = 1
+    input_dim = 256  # PreCoreEncoder output dimension
+
+    # Create config for each architecture
+    config = {
+        "S5_D_MODEL": dim,
+        "S5_SSM_SIZE": 256,
+        "S5_N_LAYERS": layers,
+        "S5_BLOCKS": 1,
+        "S5_ACTIVATION": "full_glu",
+        "S5_DO_NORM": False,
+        "S5_PRENORM": False,
+        "S5_DO_GTRXL_NORM": False,
+        "AGALITE_N_LAYERS": layers,
+        "AGALITE_D_MODEL": dim,
+        "AGALITE_D_HEAD": dim,
+        "AGALITE_D_FFC": dim,
+        "AGALITE_N_HEADS": n_heads,
+        "AGALITE_ETA": eta,
+        "AGALITE_R": r,
+    }
+
+    rng = jax.random.PRNGKey(0)
+
+    if arch == "GRU":
+        core = GRUCore()
+        hidden = GRUCore.initialize_carry(batch_size, config)
+    elif arch == "S5":
+        core = S5Core(config=config)
+        hidden = S5Core.initialize_carry(batch_size, config)
+    elif arch == "AGaLiTe":
+        core = AGaLiTeCore(config=config)
+        hidden = AGaLiTeCore.initialize_carry(batch_size, config)
+    else:
+        raise ValueError(f"Unknown architecture: {arch}")
+
+    # Initialize with dummy input
+    embedding = jnp.zeros((seq_len, batch_size, input_dim))
+    dones = jnp.zeros((seq_len, batch_size))
+
+    params = core.init(rng, hidden, embedding, dones)
+    return count_params(params)
+
+
 def create_and_count_params(
     model_config: ModelConfig, obs_dim: int = 16, action_dim: int = 4
 ) -> int:
-    """Create a model and count its parameters."""
-    from frp_popjaxrl.algorithms.models import (
-        GRURepModel,
-        S5RepModel,
-        AGaLiTeRepModel,
-        ActorCriticDiscrete,
-    )
+    """Create an ActorCritic model and count its parameters."""
+    from frp_popjaxrl.algorithms.models import ActorCriticDiscrete, ActorCriticBase
 
     config = model_config.to_config_dict(obs_dim, action_dim)
 
-    # Select RepModel based on architecture
-    if model_config.arch == "GRU":
-        rep_model = GRURepModel(config=config)
-    elif model_config.arch == "S5":
-        rep_model = S5RepModel(config=config)
-    elif model_config.arch == "AGaLiTe":
-        rep_model = AGaLiTeRepModel(config=config)
-    else:
+    # Map architecture name to core_type
+    core_type_map = {"GRU": "gru", "S5": "s5", "AGaLiTe": "agalite"}
+    core_type = core_type_map.get(model_config.arch)
+    if core_type is None:
         raise ValueError(f"Unknown architecture: {model_config.arch}")
 
-    # Create ActorCritic network
+    # Create ActorCritic network with unified interface
     network = ActorCriticDiscrete(
-        rep_model=rep_model,
+        core_type=core_type,
         action_dim=action_dim,
         config=config,
     )
@@ -106,7 +160,7 @@ def create_and_count_params(
     # Initialize and count parameters
     batch_size = 1
     seq_len = 1
-    init_hidden = rep_model.initialize_carry(batch_size, config)
+    init_hidden = ActorCriticBase.initialize_carry(batch_size, core_type, config)
     init_x = (
         jnp.zeros((seq_len, batch_size, obs_dim)),
         jnp.zeros((seq_len, batch_size)),
@@ -118,8 +172,60 @@ def create_and_count_params(
     return count_params(params)
 
 
+def print_core_params_comparison():
+    """Print Core-only parameter comparison table."""
+    print()
+    print("=" * 80)
+    print("Core-Only Parameter Comparison (excluding encoder/actor/critic heads)")
+    print("=" * 80)
+    print(f"{'Core':<12} {'Layers':<7} {'Dim':<5} {'Heads':<7} {'Eta':<5} {'Params':>12} {'vs GRU':>10}")
+    print("-" * 80)
+
+    # GRU baseline (single layer, dim=256)
+    gru_params = count_core_params("GRU", layers=1, dim=256)
+    print(f"{'GRU':<12} {1:<7} {256:<5} {'-':<7} {'-':<5} {gru_params:>12,} {1.0:>9.2f}x")
+
+    # S5 configurations
+    for layers in [1, 2, 4]:
+        params = count_core_params("S5", layers=layers, dim=256)
+        ratio = params / gru_params
+        print(f"{'S5':<12} {layers:<7} {256:<5} {'-':<7} {'-':<5} {params:>12,} {ratio:>9.2f}x")
+
+    # AGaLiTe configurations
+    for layers in [1, 2, 4]:
+        params = count_core_params("AGaLiTe", layers=layers, dim=256, n_heads=4, eta=4)
+        ratio = params / gru_params
+        print(f"{'AGaLiTe':<12} {layers:<7} {256:<5} {4:<7} {4:<5} {params:>12,} {ratio:>9.2f}x")
+
+    print("=" * 80)
+
+    # Summary
+    print()
+    print("=" * 80)
+    print("Core Parameter Summary")
+    print("=" * 80)
+
+    s5_1l = count_core_params("S5", layers=1, dim=256)
+    s5_2l = count_core_params("S5", layers=2, dim=256)
+    s5_4l = count_core_params("S5", layers=4, dim=256)
+
+    agalite_1l = count_core_params("AGaLiTe", layers=1, dim=256, n_heads=4, eta=4)
+    agalite_2l = count_core_params("AGaLiTe", layers=2, dim=256, n_heads=4, eta=4)
+    agalite_4l = count_core_params("AGaLiTe", layers=4, dim=256, n_heads=4, eta=4)
+
+    print(f"\n{'Core':<12} {'1 Layer':>12} {'2 Layers':>12} {'4 Layers':>12} {'vs GRU (1L)':>12}")
+    print("-" * 60)
+    print(f"{'GRU':<12} {gru_params:>12,} {'-':>12} {'-':>12} {'1.00x':>12}")
+    print(f"{'S5':<12} {s5_1l:>12,} {s5_2l:>12,} {s5_4l:>12,} {s5_1l/gru_params:>11.2f}x")
+    print(f"{'AGaLiTe':<12} {agalite_1l:>12,} {agalite_2l:>12,} {agalite_4l:>12,} {agalite_1l/gru_params:>11.2f}x")
+    print("=" * 60)
+
+
 def main():
     """Main function to compare model parameters."""
+    # First, show Core-only comparison
+    print_core_params_comparison()
+
     # Configuration
     obs_dim = 16
     action_dim = 4

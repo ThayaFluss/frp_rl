@@ -9,7 +9,7 @@ checkpoints/
 *.pkl
 exp/
 tbm*
-dev/
+*/docs/dev/
 logs/
 
 # Byte-compiled / optimized / DLL files

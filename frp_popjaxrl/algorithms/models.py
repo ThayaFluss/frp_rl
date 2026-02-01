@@ -2,12 +2,16 @@
 Model definitions for PPO with different architectures.
 
 This module contains:
-- GRUCore: GRU-based core for stateful temporal processing
-- GRURepModel: GRU-based representation model (ObsEncoder + GRUCore)
-- S5RepModel: S5-based representation model (ObsEncoder + S5Core)
-- ActorCriticBase: Base class for actor-critic networks
+- RecurrentCore classes: GRUCore, S5Core, AGaLiTeCore with unified interface
+- PreCoreEncoder: Shared pre-recurrent encoder (2-layer Dense + leaky_relu)
+- ActorCriticBase: Base class for actor-critic networks with integrated encoder and core
 - ActorCriticContinuous: Actor-critic for continuous action spaces
 - ActorCriticDiscrete: Actor-critic for discrete action spaces
+
+Core Interface:
+    All cores implement:
+    - __call__(hidden, embedding, dones) -> (new_hidden, output)
+    - initialize_carry(batch_size, config) -> hidden
 """
 
 import jax
@@ -16,14 +20,23 @@ import flax.linen as nn
 import numpy as np
 import functools
 from flax.linen.initializers import constant, orthogonal
-from typing import Dict
+from typing import Dict, Tuple
 import distrax
-from .s5 import StackedEncoderModel
+from .s5 import StackedEncoderModel, init_S5SSM, make_DPLR_HiPPO
 from .agalite import BatchedAGaLiTe
 
 
+# =============================================================================
+# Core Classes with Unified Interface
+# =============================================================================
+
+
 class GRUCore(nn.Module):
-    """GRU Core for stateful temporal processing."""
+    """GRU Core with unified interface.
+
+    Wraps nn.GRUCell with scan for sequence processing.
+    Hidden state format: [(1, batch, hidden_size)]
+    """
 
     @functools.partial(
         nn.scan,
@@ -32,155 +45,90 @@ class GRUCore(nn.Module):
         out_axes=0,
         split_rngs={'params': False})
     @nn.compact
-    def __call__(self, carry, x):
-        """Applies the GRU core to process temporal sequences."""
+    def _scan_fn(self, carry, x):
+        """Internal scan function for GRU."""
         rnn_state = carry
         ins, resets = x
         rnn_state = jnp.where(
             resets[:, np.newaxis],
-            self.initialize_carry(ins.shape[0], ins.shape[1]),
+            self._initialize_carry_inner(ins.shape[0], ins.shape[1]),
             rnn_state
         )
         features = rnn_state[0].shape[-1]
         new_rnn_state, y = nn.GRUCell(features)(rnn_state, ins)
         return new_rnn_state, y
 
-    @staticmethod
-    def initialize_carry(batch_size, hidden_size):
-        """Initialize the hidden state for GRU Core."""
-        return nn.GRUCell(hidden_size, parent=None).initialize_carry(
-            jax.random.PRNGKey(0), (batch_size, hidden_size))
-
-
-# ============================================================================
-# New Refactored Architecture: RepModel = ObsEncoder + Core
-# ============================================================================
-
-
-class GRURepModel(nn.Module):
-    """
-    GRU-based encoder for ActorCritic networks.
-
-    This encoder handles sequence encoding using GRU, independent of
-    the action space type (continuous/discrete).
-    """
-
-    config: Dict
-
-    @staticmethod
-    def initialize_carry(batch_size, config):
-        """
-        Initialize GRU hidden state with shape compatible with S5.
+    def __call__(self, hidden, embedding, dones):
+        """Forward pass with unified interface.
 
         Args:
-            batch_size: Number of environments
-            config: Configuration dict (unused for GRU, kept for consistency)
-
-        Returns:
-            Initial GRU hidden state with shape (1, batch_size, hidden_size)
-            Wrapped in a list for compatibility with S5's multi-layer structure
-        """
-        import jax.numpy as jnp
-        hidden_size = 256  # GRU hidden size
-        carry = GRUCore.initialize_carry(batch_size, hidden_size)
-        # Add time dimension to match S5 format: (batch, hidden) -> (1, batch, hidden)
-        # Return as single-element list to match S5's multi-layer structure
-        return [jnp.expand_dims(carry, axis=0)]
-
-    @nn.compact
-    def __call__(self, hidden, obs, dones):
-        """
-        Encode observations using GRU.
-
-        Args:
-            hidden: GRU hidden state (list with single element for S5 compatibility)
-            obs: Observations [seq_len, batch, obs_dim]
+            hidden: Hidden state [(1, batch, hidden_size)]
+            embedding: Encoded observations [seq_len, batch, embed_dim]
             dones: Done flags [seq_len, batch]
 
         Returns:
-            (new_hidden, embedding): Updated hidden state (list format) and embeddings [seq_len, batch, 256]
+            (new_hidden, output): Updated hidden state and core output
         """
-        if self.config.get("NO_RESET"):
-            dones = jnp.zeros_like(dones)
-
-        # Extract hidden state from list and remove time dimension
-        # hidden is [(1, batch, hidden_size)]
+        # Extract from list and remove time dimension
         h = hidden[0].squeeze(0)  # (1, batch, hidden) -> (batch, hidden)
-
-        # Encoder layers
-        embedding = nn.Dense(
-            128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(obs)
-        embedding = nn.leaky_relu(embedding)
-        embedding = nn.Dense(
-            256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(embedding)
-        embedding = nn.leaky_relu(embedding)
-
-        # GRU processing
         rnn_in = (embedding, dones)
-        h, embedding = GRUCore()(h, rnn_in)
+        h, out = self._scan_fn(h, rnn_in)
+        # Wrap back to list format
+        new_hidden = [jnp.expand_dims(h, axis=0)]
+        return new_hidden, out
 
-        # Add time dimension back and wrap in list
-        new_hidden = [jnp.expand_dims(h, axis=0)]  # (batch, hidden) -> [(1, batch, hidden)]
+    @staticmethod
+    def _initialize_carry_inner(batch_size, hidden_size):
+        """Initialize GRU cell carry (internal use)."""
+        return nn.GRUCell(hidden_size, parent=None).initialize_carry(
+            jax.random.PRNGKey(0), (batch_size, hidden_size))
 
-        return new_hidden, embedding
+    @staticmethod
+    def initialize_carry(batch_size: int, config: Dict):
+        """Initialize GRU hidden state.
+
+        Args:
+            batch_size: Number of environments
+            config: Configuration dictionary (unused for GRU, kept for interface)
+
+        Returns:
+            Hidden state [(1, batch, hidden_size)]
+        """
+        hidden_size = 256  # Encoder output size
+        carry = GRUCore._initialize_carry_inner(batch_size, hidden_size)
+        # (batch, hidden) -> [(1, batch, hidden)]
+        return [jnp.expand_dims(carry, axis=0)]
 
 
-class S5RepModel(nn.Module):
-    """
-    S5-based encoder for ActorCritic networks.
+class S5Core(nn.Module):
+    """S5 Core wrapper with unified interface.
 
-    This encoder handles sequence encoding using S5 state space model,
-    independent of the action space type (continuous/discrete).
+    Encapsulates S5-specific initialization (HiPPO, SSM) and provides
+    the same interface as GRUCore.
+
+    Attributes:
+        config: Configuration dictionary with S5 parameters
     """
 
     config: Dict
 
-    @staticmethod
-    def initialize_carry(batch_size, config):
-        """
-        Initialize S5 hidden state.
-
-        Args:
-            batch_size: Number of environments
-            config: Configuration dict containing S5_SSM_SIZE and S5_N_LAYERS
-
-        Returns:
-            Initial S5 hidden state
-        """
-        ssm_size = config["S5_SSM_SIZE"] // 2
-        n_layers = config["S5_N_LAYERS"]
-        return StackedEncoderModel.initialize_carry(batch_size, ssm_size, n_layers)
-
-    @staticmethod
-    def _create_ssm_init_fn(config):
-        """
-        Create SSM initialization function from config.
-
-        Args:
-            config: Configuration dict containing S5 parameters
-
-        Returns:
-            SSM initialization function for StackedEncoderModel
-        """
-        from .s5 import init_S5SSM, make_DPLR_HiPPO
-
-        d_model = config["S5_D_MODEL"]
-        ssm_size = config["S5_SSM_SIZE"]
-        blocks = config["S5_BLOCKS"]
+    def setup(self):
+        """Setup S5 StackedEncoderModel with HiPPO initialization."""
+        d_model = self.config["S5_D_MODEL"]
+        ssm_size = self.config["S5_SSM_SIZE"]
+        blocks = self.config["S5_BLOCKS"]
         block_size = int(ssm_size / blocks)
 
         Lambda, _, _, V, _ = make_DPLR_HiPPO(ssm_size)
         block_size = block_size // 2
-        ssm_size = ssm_size // 2
+        ssm_size_half = ssm_size // 2
         Lambda = Lambda[:block_size]
         V = V[:, :block_size]
         Vinv = V.conj().T
 
-        return init_S5SSM(
+        ssm_init_fn = init_S5SSM(
             H=d_model,
-            P=ssm_size,
+            P=ssm_size_half,
             Lambda_re_init=Lambda.real,
             Lambda_im_init=Lambda.imag,
             V=V,
@@ -194,21 +142,9 @@ class S5RepModel(nn.Module):
             bidirectional=False
         )
 
-    def setup(self):
-        """Setup S5 encoder layers."""
-        # Encoder layers
-        self.rep_model_0 = nn.Dense(
-            128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )
-        self.rep_model_1 = nn.Dense(
-            256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )
-
-        # S5 state space model
-        ssm_init_fn = self._create_ssm_init_fn(self.config)
         self.s5 = StackedEncoderModel(
             ssm=ssm_init_fn,
-            d_model=self.config["S5_D_MODEL"],
+            d_model=d_model,
             n_layers=self.config["S5_N_LAYERS"],
             activation=self.config["S5_ACTIVATION"],
             do_norm=self.config["S5_DO_NORM"],
@@ -216,76 +152,90 @@ class S5RepModel(nn.Module):
             do_gtrxl_norm=self.config["S5_DO_GTRXL_NORM"],
         )
 
-    def __call__(self, hidden, obs, dones):
-        """
-        Encode observations using S5.
+    def __call__(self, hidden, embedding, dones):
+        """Forward pass with unified interface.
 
         Args:
-            hidden: S5 hidden state
-            obs: Observations [seq_len, batch, obs_dim]
+            hidden: S5 hidden state (list of layer states)
+            embedding: Encoded observations [seq_len, batch, embed_dim]
             dones: Done flags [seq_len, batch]
 
         Returns:
-            (new_hidden, embedding): Updated hidden state and embeddings [seq_len, batch, d_model]
+            (new_hidden, output): Updated hidden state and core output
         """
-        if self.config.get("NO_RESET"):
-            dones = jnp.zeros_like(dones)
+        return self.s5(hidden, embedding, dones)
 
-        # Encoder layers
-        embedding = self.rep_model_0(obs)
-        embedding = nn.leaky_relu(embedding)
-        embedding = self.rep_model_1(embedding)
-        embedding = nn.leaky_relu(embedding)
+    @staticmethod
+    def initialize_carry(batch_size: int, config: Dict):
+        """Initialize S5 hidden state.
 
-        # S5 processing
-        hidden, embedding = self.s5(hidden, embedding, dones)
+        Args:
+            batch_size: Number of environments
+            config: Configuration dictionary with S5 parameters
 
-        return hidden, embedding
+        Returns:
+            S5 hidden state (list of layer states)
+        """
+        ssm_size = config["S5_SSM_SIZE"] // 2
+        n_layers = config["S5_N_LAYERS"]
+        return StackedEncoderModel.initialize_carry(batch_size, ssm_size, n_layers)
 
 
-class AGaLiTeRepModel(nn.Module):
-    """
-    AGaLiTe-based encoder following RepModel interface.
+class AGaLiTeCore(nn.Module):
+    """AGaLiTe Core wrapper with unified interface.
 
-    Key: Hidden state format is (1, batch, ...) to match GRU/S5,
-    enabling use with ppo_standard.py without modifications.
+    Encapsulates AGaLiTe-specific hidden state format conversion
+    ((1, batch, ...) <-> (batch, ...)) and provides the same interface.
 
-    The format conversion:
-    - initialize_carry: returns (1, batch, ...) format
-    - __call__ entry: converts (1, batch, ...) -> (batch, ...) via squeeze(0)
-    - __call__ exit: converts (batch, ...) -> (1, batch, ...) via x[None, :]
+    Attributes:
+        config: Configuration dictionary with AGaLiTe parameters
     """
 
     config: Dict
 
     def setup(self):
-        """Setup AGaLiTe module."""
+        """Setup BatchedAGaLiTe module."""
         self.agalite = BatchedAGaLiTe(
             n_layers=self.config.get("AGALITE_N_LAYERS", 4),
-            d_model=self.config.get("AGALITE_D_MODEL", 64),
+            d_model=self.config.get("AGALITE_D_MODEL", 256),
             d_head=self.config.get("AGALITE_D_HEAD", 64),
-            d_ffc=self.config.get("AGALITE_D_FFC", 64),
+            d_ffc=self.config.get("AGALITE_D_FFC", 256),
             n_heads=self.config.get("AGALITE_N_HEADS", 4),
             eta=self.config.get("AGALITE_ETA", 4),
             r=self.config.get("AGALITE_R", 2),
             reset_on_terminate=True
         )
 
-    @staticmethod
-    def initialize_carry(batch_size, config) -> dict:
-        """
-        Initialize AGaLiTe memory state with leading 1 dimension.
+    def __call__(self, hidden, embedding, dones):
+        """Forward pass with hidden state format conversion.
 
-        This matches GRU/S5 format: (1, batch, ...)
+        Args:
+            hidden: AGaLiTe hidden state with (1, batch, ...) format
+            embedding: Encoded observations [seq_len, batch, embed_dim]
+            dones: Done flags [seq_len, batch]
+
+        Returns:
+            (new_hidden, output): Updated hidden state and core output
+        """
+        # Remove leading 1: (1, batch, ...) -> (batch, ...)
+        hidden_inner = jax.tree_map(lambda x: x.squeeze(0), hidden)
+        rnn_in = (embedding, dones)
+        new_hidden_inner, out = self.agalite(hidden_inner, rnn_in)
+        # Add leading 1 back: (batch, ...) -> (1, batch, ...)
+        new_hidden = jax.tree_map(lambda x: x[None, :], new_hidden_inner)
+        return new_hidden, out
+
+    @staticmethod
+    def initialize_carry(batch_size: int, config: Dict):
+        """Initialize AGaLiTe hidden state with (1, batch, ...) format.
 
         Args:
             batch_size: Number of environments
-            config: Configuration dict containing AGaLiTe parameters
+            config: Configuration dictionary with AGaLiTe parameters
 
         Returns:
-            Initial memory state with format (1, batch, ...)
+            AGaLiTe hidden state with (1, batch, ...) format
         """
-        import jax
         memory = BatchedAGaLiTe.initialize_carry(
             batch_size=batch_size,
             n_layers=config.get("AGALITE_N_LAYERS", 4),
@@ -294,89 +244,154 @@ class AGaLiTeRepModel(nn.Module):
             eta=config.get("AGALITE_ETA", 4),
             r=config.get("AGALITE_R", 2)
         )
-        # Add leading 1 to match GRU/S5 format: (batch, ...) -> (1, batch, ...)
+        # (batch, ...) -> (1, batch, ...)
         return jax.tree_map(lambda x: x[None, :], memory)
 
+
+# =============================================================================
+# Core Factory
+# =============================================================================
+
+
+def get_core_class(core_type: str):
+    """Get the Core class for a given core type.
+
+    Args:
+        core_type: One of "gru", "s5", "agalite"
+
+    Returns:
+        The corresponding Core class
+    """
+    cores = {
+        "gru": GRUCore,
+        "s5": S5Core,
+        "agalite": AGaLiTeCore,
+    }
+    if core_type not in cores:
+        raise ValueError(f"Unknown core_type: {core_type}")
+    return cores[core_type]
+
+
+class PreCoreEncoder(nn.Module):
+    """
+    Shared Pre-Recurrent Encoder (2-layer Dense + leaky_relu).
+
+    This encoder is used by all core types (GRU, S5, AGaLiTe) to transform
+    observations before feeding into the recurrent core.
+
+    Attributes:
+        hidden_dims: Tuple of hidden dimensions for the two Dense layers.
+                     Default is (128, 256) to match existing encoder structure.
+    """
+
+    hidden_dims: Tuple[int, int] = (128, 256)
+
     @nn.compact
-    def __call__(self, hidden, obs, dones):
+    def __call__(self, obs):
         """
-        Encode observations using AGaLiTe.
+        Encode observations through 2-layer MLP.
 
         Args:
-            hidden: Memory state with format (1, batch, ...) for GRU/S5 compatibility
-            obs: Observations [seq_len, batch, obs_dim]
-            dones: Done flags [seq_len, batch]
+            obs: Input observations with shape [..., obs_dim]
 
         Returns:
-            (new_hidden, embedding): Updated hidden state (1, batch, ...) and
-                                     embeddings [seq_len, batch, d_model]
+            Encoded observations with shape [..., hidden_dims[-1]]
         """
-        if self.config.get("NO_RESET"):
-            dones = jnp.zeros_like(dones)
+        x = obs
+        for i, dim in enumerate(self.hidden_dims):
+            x = nn.Dense(
+                dim,
+                kernel_init=orthogonal(np.sqrt(2)),
+                bias_init=constant(0.0),
+                name=f"encoder_{i}"
+            )(x)
+            x = nn.leaky_relu(x)
+        return x
 
-        # Remove leading 1: (1, batch, ...) -> (batch, ...)
-        hidden_inner = jax.tree_map(lambda x: x.squeeze(0), hidden)
 
-        # Pre-embedding to d_model dimension
-        d_model = self.config.get("AGALITE_D_MODEL", 64)
-        embedding = nn.Dense(
-            d_model,
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0)
-        )(obs)
-        embedding = nn.relu(embedding)
-
-        # AGaLiTe processing
-        rnn_in = (embedding, dones)
-        new_hidden_inner, embedding = self.agalite(hidden_inner, rnn_in)
-
-        # Add leading 1 back: (batch, ...) -> (1, batch, ...)
-        new_hidden = jax.tree_map(lambda x: x[None, :], new_hidden_inner)
-
-        return new_hidden, embedding
+# =============================================================================
+# Actor-Critic Base
+# =============================================================================
 
 
 class ActorCriticBase(nn.Module):
     """
-    Base ActorCritic network with pluggable RepModel.
+    Base ActorCritic network with integrated encoder and core.
 
-    This class provides the common actor/critic heads and delegates
-    representation learning to a separate RepModel (GRU or S5).
-    RepModel = ObsEncoder (stateless) + Core (stateful).
+    This class provides:
+    - Shared PreCoreEncoder for all core types
+    - Unified core interface via GRUCore/S5Core/AGaLiTeCore
+    - Common actor/critic heads
+
+    Attributes:
+        core_type: One of "gru", "s5", or "agalite"
+        action_dim: Dimension of action space
+        config: Configuration dictionary
     """
 
-    rep_model: nn.Module  # GRURepModel or S5RepModel
+    core_type: str  # "gru", "s5", "agalite"
     action_dim: int
     config: Dict
 
+    def setup(self):
+        """Setup encoder and core based on core_type."""
+        # Shared pre-recurrent encoder
+        self.encoder = PreCoreEncoder()
+
+        # Create core with unified interface
+        CoreClass = get_core_class(self.core_type)
+        if self.core_type == "gru":
+            # GRU doesn't need config in setup (uses nn.compact internally)
+            self.core = CoreClass()
+        else:
+            # S5 and AGaLiTe need config for setup
+            self.core = CoreClass(config=self.config)
+
+    @staticmethod
+    def initialize_carry(batch_size: int, core_type: str, config: Dict):
+        """
+        Initialize hidden state for the specified core type.
+
+        Delegates to the core-specific initialize_carry method.
+
+        Args:
+            batch_size: Number of environments
+            core_type: One of "gru", "s5", "agalite"
+            config: Configuration dictionary
+
+        Returns:
+            Initial hidden state appropriate for the core type
+        """
+        CoreClass = get_core_class(core_type)
+        return CoreClass.initialize_carry(batch_size, config)
+
+    def forward_core(self, hidden, embedding, dones):
+        """
+        Forward pass through the recurrent core.
+
+        Uses unified core interface.
+
+        Args:
+            hidden: Hidden state from initialize_carry or previous step
+            embedding: Encoded observations [seq_len, batch, embed_dim]
+            dones: Done flags [seq_len, batch]
+
+        Returns:
+            (new_hidden, output): Updated hidden state and core output
+        """
+        return self.core(hidden, embedding, dones)
+
     def initialize_core_hidden_state(self, batch_size):
         """
-        Initialize Core hidden state.
-
-        This method delegates to the RepModel's initialize_carry method,
-        providing a unified interface regardless of Core type (GRU/S5).
+        Initialize core hidden state (convenience method).
 
         Args:
             batch_size: Number of environments
 
         Returns:
-            Initial Core hidden state
+            Initial hidden state for this network's core type
         """
-        return self.rep_model.initialize_carry(batch_size, self.config)
-
-    def forward_rep_model(self, hidden, obs, dones):
-        """
-        Forward pass through RepModel to obtain representations.
-
-        Args:
-            hidden: Core hidden state
-            obs: Observations
-            dones: Done flags
-
-        Returns:
-            (new_hidden, representation): Updated hidden state and learned representations
-        """
-        return self.rep_model(hidden, obs, dones)
+        return self.initialize_carry(batch_size, self.core_type, self.config)
 
     def decode_actor(self, embedding):
         """
@@ -418,15 +433,22 @@ class ActorCriticContinuous(ActorCriticBase):
     ActorCritic for continuous action spaces.
 
     Uses Gaussian (MultivariateNormalDiag) distribution.
-    Works with any encoder (GRU, S5, etc.).
+    Works with any core type (GRU, S5, AGaLiTe).
     """
 
     @nn.compact
     def __call__(self, hidden, x):
         obs, dones = x
 
-        # Encode (GRU or S5)
-        hidden, embedding = self.forward_rep_model(hidden, obs, dones)
+        # Handle NO_RESET config option
+        if self.config.get("NO_RESET"):
+            dones = jnp.zeros_like(dones)
+
+        # Encode observations
+        embedding = self.encoder(obs)
+
+        # Process through recurrent core
+        hidden, embedding = self.forward_core(hidden, embedding, dones)
 
         # Actor - Continuous (Gaussian)
         actor_mean = self.decode_actor(embedding)
@@ -444,15 +466,22 @@ class ActorCriticDiscrete(ActorCriticBase):
     ActorCritic for discrete action spaces.
 
     Uses Categorical distribution.
-    Works with any encoder (GRU, S5, etc.).
+    Works with any core type (GRU, S5, AGaLiTe).
     """
 
     @nn.compact
     def __call__(self, hidden, x):
         obs, dones = x
 
-        # Encode (GRU or S5)
-        hidden, embedding = self.forward_rep_model(hidden, obs, dones)
+        # Handle NO_RESET config option
+        if self.config.get("NO_RESET"):
+            dones = jnp.zeros_like(dones)
+
+        # Encode observations
+        embedding = self.encoder(obs)
+
+        # Process through recurrent core
+        hidden, embedding = self.forward_core(hidden, embedding, dones)
 
         # Actor - Discrete (Categorical)
         actor_logits = self.decode_actor(embedding)

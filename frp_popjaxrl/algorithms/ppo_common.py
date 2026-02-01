@@ -180,10 +180,10 @@ def setup_config(config):
 
 def create_network(encoder_type: str, action_space, config):
     """
-    Create ActorCritic network with specified encoder and action space.
+    Create ActorCritic network with specified core type and action space.
 
     This function:
-    1. Selects encoder (GRU or S5) based on encoder_type
+    1. Validates core_type (GRU, S5, or AGaLiTe)
     2. Detects action space type (continuous or discrete)
     3. Assembles the appropriate ActorCritic network
 
@@ -191,36 +191,29 @@ def create_network(encoder_type: str, action_space, config):
     no conditional branches in compiled code.
 
     Args:
-        encoder_type: 'gru' or 's5'
+        encoder_type: 'gru', 's5', or 'agalite'
         action_space: Environment action space (spaces.Box or spaces.Discrete)
         config: Configuration dictionary
 
     Returns:
-        Instantiated ActorCritic network (with GRU/S5 encoder and Continuous/Discrete head)
+        Instantiated ActorCritic network (with GRU/S5/AGaLiTe core and Continuous/Discrete head)
 
     Example:
-        >>> # GRU encoder with automatic action space detection
+        >>> # GRU core with automatic action space detection
         >>> network = create_network('gru', env.action_space(env_params), config)
         >>>
-        >>> # S5 encoder with automatic action space detection
+        >>> # S5 core with automatic action space detection
         >>> network = create_network('s5', env.action_space(env_params), config)
     """
-    from algorithms.models import (
-        GRURepModel, S5RepModel, AGaLiTeRepModel,
-        ActorCriticContinuous, ActorCriticDiscrete
-    )
+    from algorithms.models import ActorCriticContinuous, ActorCriticDiscrete
 
-    # Select RepModel based on type
-    if encoder_type.lower() == 'gru':
-        rep_model = GRURepModel(config=config)
-    elif encoder_type.lower() == 's5':
-        rep_model = S5RepModel(config=config)
-    elif encoder_type.lower() == 'agalite':
-        rep_model = AGaLiTeRepModel(config=config)
-    else:
+    # Validate core_type
+    valid_types = ['gru', 's5', 'agalite']
+    core_type = encoder_type.lower()
+    if core_type not in valid_types:
         raise ValueError(
             f"Unknown encoder_type: {encoder_type}. "
-            f"Valid values are 'gru', 's5', or 'agalite'."
+            f"Valid values are: {valid_types}"
         )
 
     # Detect action space type and create appropriate ActorCritic
@@ -229,7 +222,7 @@ def create_network(encoder_type: str, action_space, config):
         action_dim = action_space.shape[0]
         config["CONTINUOUS"] = True
         return ActorCriticContinuous(
-            rep_model=rep_model,
+            core_type=core_type,
             action_dim=action_dim,
             config=config
         )
@@ -238,7 +231,7 @@ def create_network(encoder_type: str, action_space, config):
         action_dim = action_space.n
         config["CONTINUOUS"] = False
         return ActorCriticDiscrete(
-            rep_model=rep_model,
+            core_type=core_type,
             action_dim=action_dim,
             config=config
         )

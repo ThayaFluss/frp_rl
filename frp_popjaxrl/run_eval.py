@@ -33,8 +33,6 @@ from gymnax.environments import spaces
 
 from utils.checkpoint import load_checkpoint
 from algorithms.ppo_common import create_network
-from algorithms.models import GRURepModel, S5RepModel
-from algorithms.s5 import StackedEncoderModel
 from envs.wrappers import AliasPrevActionV2, LogWrapper
 
 

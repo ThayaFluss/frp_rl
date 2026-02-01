@@ -35,8 +35,6 @@ from gymnax.environments import spaces
 
 from utils.checkpoint import load_checkpoint
 from algorithms.ppo_common import create_network
-from algorithms.models import GRURepModel, S5RepModel
-from algorithms.s5 import StackedEncoderModel
 from envs.meta_environment_separated import create_meta_environment
 from envs.wrappers import AliasPrevActionV2, LogWrapper
 from frp.frp_manager import FRPManager, create_eval_frp_manager

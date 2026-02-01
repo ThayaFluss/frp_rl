@@ -2,7 +2,7 @@
 Minimal tests for AGaLiTe-based PPO training.
 
 Tests:
-1. AGaLiTeRepModel initialization and hidden state format
+1. AGaLiTeCore initialization and hidden state format
 2. AGaLiTe training with ppo_standard.py
 """
 
@@ -10,12 +10,12 @@ import unittest
 import jax
 import jax.numpy as jnp
 
-from algorithms.models import AGaLiTeRepModel
+from algorithms.models import AGaLiTeCore
 from algorithms.agalite import BatchedAGaLiTe
 
 
-class TestAGaLiTeRepModel(unittest.TestCase):
-    """Tests for AGaLiTeRepModel initialization and interface."""
+class TestAGaLiTeCore(unittest.TestCase):
+    """Tests for AGaLiTeCore initialization and interface."""
 
     def test_initialize_carry_shape(self):
         """Test that initialize_carry returns (1, batch, ...) format."""
@@ -31,7 +31,7 @@ class TestAGaLiTeRepModel(unittest.TestCase):
             "AGALITE_R": 2,
         }
 
-        carry = AGaLiTeRepModel.initialize_carry(batch_size, config)
+        carry = AGaLiTeCore.initialize_carry(batch_size, config)
 
         # Verify carry is a dict with 'layer_1', 'layer_2', ... keys
         for layer_idx in range(1, n_layers + 1):
@@ -55,17 +55,17 @@ class TestAGaLiTeRepModel(unittest.TestCase):
         batch_size = 2
         config = {}  # Use all defaults
 
-        carry = AGaLiTeRepModel.initialize_carry(batch_size, config)
+        carry = AGaLiTeCore.initialize_carry(batch_size, config)
 
         # Should work with defaults (n_layers defaults to 4)
         self.assertIn("layer_1", carry)
         self.assertIn("layer_4", carry)  # Default n_layers is 4
 
-    def test_model_forward_pass(self):
-        """Test AGaLiTeRepModel forward pass."""
+    def test_core_forward_pass(self):
+        """Test AGaLiTeCore forward pass."""
         batch_size = 2
         seq_len = 8
-        obs_dim = 16
+        embed_dim = 64  # This should match d_model for AGaLiTe
 
         config = {
             "AGALITE_N_LAYERS": 2,
@@ -78,20 +78,20 @@ class TestAGaLiTeRepModel(unittest.TestCase):
             "NO_RESET": False,
         }
 
-        model = AGaLiTeRepModel(config=config)
-        carry = AGaLiTeRepModel.initialize_carry(batch_size, config)
+        model = AGaLiTeCore(config=config)
+        carry = AGaLiTeCore.initialize_carry(batch_size, config)
 
-        # Create dummy inputs
-        obs = jnp.zeros((seq_len, batch_size, obs_dim))
+        # Create dummy inputs (embedding, not raw obs - Core expects encoded input)
+        embedding = jnp.zeros((seq_len, batch_size, embed_dim))
         dones = jnp.zeros((seq_len, batch_size))
 
         # Initialize and run forward pass
         rng = jax.random.PRNGKey(0)
-        variables = model.init(rng, carry, obs, dones)
-        new_carry, embedding = model.apply(variables, carry, obs, dones)
+        variables = model.init(rng, carry, embedding, dones)
+        new_carry, output = model.apply(variables, carry, embedding, dones)
 
         # Verify output shapes
-        self.assertEqual(embedding.shape, (seq_len, batch_size, config["AGALITE_D_MODEL"]))
+        self.assertEqual(output.shape, (seq_len, batch_size, config["AGALITE_D_MODEL"]))
 
         # Verify carry has same structure and leading 1 dimension
         for layer_idx in range(1, config["AGALITE_N_LAYERS"] + 1):

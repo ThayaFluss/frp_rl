@@ -37,8 +37,7 @@ def get_make_train(arch: str):
     """Get the appropriate make_train function based on architecture.
 
     All architectures (GRU, S5, AGaLiTe) use the unified ppo_standard.py module.
-    AGaLiTeRepModel has been added to models.py with the same interface as
-    GRURepModel/S5RepModel.
+    The ActorCriticBase class handles all core types through the core_type parameter.
 
     Args:
         arch: Architecture name ('gru', 's5', or 'agalite')

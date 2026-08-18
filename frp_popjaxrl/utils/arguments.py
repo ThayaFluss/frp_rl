@@ -196,7 +196,7 @@ def add_agalite_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--agalite_d_model",
         type=int,
-        default=64,
+        default=256,
         help="AGaLiTe model dimension (default: %(default)s)",
     )
     parser.add_argument(
@@ -208,7 +208,7 @@ def add_agalite_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--agalite_d_ffc",
         type=int,
-        default=64,
+        default=256,
         help="AGaLiTe feedforward dimension (default: %(default)s)",
     )
     parser.add_argument(

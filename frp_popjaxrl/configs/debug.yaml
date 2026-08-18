@@ -23,9 +23,9 @@ s5_do_gtrxl_norm: 0
 
 # AGaLiTe minimal settings
 agalite_n_layers: 2
-agalite_d_model: 64
+agalite_d_model: 256
 agalite_d_head: 64
-agalite_d_ffc: 64
+agalite_d_ffc: 256
 agalite_n_heads: 2
 agalite_eta: 4
 agalite_r: 2

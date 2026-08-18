@@ -183,7 +183,7 @@ def create_network(encoder_type: str, action_space, config):
     Create ActorCritic network with specified core type and action space.
 
     This function:
-    1. Validates core_type (GRU, S5, or AGaLiTe)
+    1. Validates core type (gru, s5, or agalite)
     2. Detects action space type (continuous or discrete)
     3. Assembles the appropriate ActorCritic network
 
@@ -191,12 +191,12 @@ def create_network(encoder_type: str, action_space, config):
     no conditional branches in compiled code.
 
     Args:
-        encoder_type: 'gru', 's5', or 'agalite'
+        encoder_type: 'gru', 's5', or 'agalite' (the core/recurrent type)
         action_space: Environment action space (spaces.Box or spaces.Discrete)
         config: Configuration dictionary
 
     Returns:
-        Instantiated ActorCritic network (with GRU/S5/AGaLiTe core and Continuous/Discrete head)
+        Instantiated ActorCritic network (with specified core and Continuous/Discrete head)
 
     Example:
         >>> # GRU core with automatic action space detection
@@ -207,13 +207,12 @@ def create_network(encoder_type: str, action_space, config):
     """
     from algorithms.models import ActorCriticContinuous, ActorCriticDiscrete
 
-    # Validate core_type
-    valid_types = ['gru', 's5', 'agalite']
+    # Validate core type
     core_type = encoder_type.lower()
-    if core_type not in valid_types:
+    if core_type not in ('gru', 's5', 'agalite'):
         raise ValueError(
             f"Unknown encoder_type: {encoder_type}. "
-            f"Valid values are: {valid_types}"
+            f"Valid values are 'gru', 's5', or 'agalite'."
         )
 
     # Detect action space type and create appropriate ActorCritic
